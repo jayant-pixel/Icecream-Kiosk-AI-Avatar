@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <rect width="200" height="200" fill="#1f3d5c" rx="20" />
+  <text x="100" y="110" font-size="64" text-anchor="middle" fill="#fef9c3">🥛</text>
+  <text x="100" y="160" font-size="20" text-anchor="middle" fill="#bfdbfe" font-family="sans-serif">Vanilla</text>
+</svg>
