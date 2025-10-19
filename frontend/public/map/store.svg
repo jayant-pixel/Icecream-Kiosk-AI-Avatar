@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200">
+  <rect width="400" height="200" fill="#0f172a" rx="24" />
+  <rect x="40" y="40" width="320" height="120" fill="#1e293b" rx="12" />
+  <rect x="60" y="60" width="80" height="80" fill="#6366f1" rx="8" />
+  <text x="100" y="110" fill="#e0e7ff" font-size="18" text-anchor="middle" font-family="sans-serif">Freezer</text>
+  <circle cx="280" cy="100" r="32" fill="#f59e0b" />
+  <text x="280" y="108" fill="#0f172a" font-size="20" text-anchor="middle" font-family="sans-serif">You</text>
+  <path d="M140 100 L240 100" stroke="#f8fafc" stroke-width="6" stroke-linecap="round" stroke-dasharray="12 12" />
+</svg>
