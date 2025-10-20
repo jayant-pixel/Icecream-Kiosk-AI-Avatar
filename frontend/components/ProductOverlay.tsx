@@ -1,9 +1,12 @@
-﻿import type { FC } from "react";
-import type { Product } from "../lib/types";
+"use client";
+
+import type { FC } from "react";
+
+import type { Product } from "@/lib/types";
 
 interface ProductOverlayProps {
   products: Product[];
-  onAddToCart: (product: Product) => void;
+  onAddToCart: (productId: string) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -14,7 +17,7 @@ export const ProductOverlay: FC<ProductOverlayProps> = ({ products, onAddToCart,
     <div className="overlay__header">
       <h2>Popular picks for you</h2>
       <button type="button" className="overlay__close" onClick={onClose} aria-label="Close overlay">
-        âœ•
+        ×
       </button>
     </div>
     <div className="overlay__content overlay__content--grid">

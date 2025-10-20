@@ -1,4 +1,6 @@
-﻿import type { FC } from "react";
+"use client";
+
+import type { FC } from "react";
 
 interface HeroProps {
   onStart: () => void;

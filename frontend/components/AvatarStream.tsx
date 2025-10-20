@@ -1,3 +1,5 @@
+"use client";
+
 import { useEffect, useRef } from "react";
 
 export type AvatarConnectionState = "inactive" | "connecting" | "connected" | "error";
@@ -27,11 +29,9 @@ export const AvatarStream = ({ stream, state, error, muted = false }: AvatarStre
     const currentStream = stream;
     if (element.srcObject !== currentStream) {
       element.srcObject = currentStream;
-      element
-        .play()
-        .catch(() => {
-          // Autoplay with audio can fail until user interacts; the Start button counts as a gesture
-        });
+      element.play().catch(() => {
+        // Autoplay with audio can fail until user interacts; the Start button counts as a gesture
+      });
     }
   }, [stream, muted]);
 

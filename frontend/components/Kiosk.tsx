@@ -1,14 +1,22 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import StreamingAvatar, { AvatarQuality, StreamingEvents, type StartAvatarResponse } from "@heygen/streaming-avatar";
-import { Hero } from "../components/Hero";
-import { AvatarStream, type AvatarConnectionState } from "../components/AvatarStream";
-import { OverlayManager, type Overlay } from "../components/OverlayManager";
-import { MicBar } from "../components/MicBar";
-import { brainRespond, newSession, type SessionDescriptor } from "../lib/api";
-import type { AssistantEvent, CartItem } from "../lib/types";
+"use client";
 
-const DEFAULT_AVATAR_ID = import.meta.env.VITE_HEYGEN_AVATAR_ID;
-const HEYGEN_BASE_URL = import.meta.env.VITE_HEYGEN_BASE_URL ?? "https://api.heygen.com";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import StreamingAvatar, {
+  AvatarQuality,
+  StreamingEvents,
+  type StartAvatarResponse,
+} from "@heygen/streaming-avatar";
+
+import { AvatarStream, type AvatarConnectionState } from "./AvatarStream";
+import { Hero } from "./Hero";
+import { MicBar } from "./MicBar";
+import { OverlayManager, type Overlay } from "./OverlayManager";
+import { brainRespond, newSession, type SessionDescriptor } from "@/lib/api";
+import type { AssistantEvent, CartItem } from "@/lib/types";
+
+const DEFAULT_AVATAR_ID = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID;
+const HEYGEN_BASE_URL =
+  process.env.NEXT_PUBLIC_HEYGEN_BASE_URL ?? "https://api.heygen.com";
 
 type ActiveSession = {
   sessionId: string;
@@ -20,15 +28,18 @@ const buildStatusSpeech = (events: AssistantEvent[], fallback: string) => {
   if (events.length === 0) {
     return fallback;
   }
+
   return events[events.length - 1]?.spokenPrompt ?? fallback;
 };
 
 export const Kiosk = () => {
   const [started, setStarted] = useState(false);
-  const [sessionDescriptor, setSessionDescriptor] = useState<SessionDescriptor | null>(null);
+  const [sessionDescriptor, setSessionDescriptor] =
+    useState<SessionDescriptor | null>(null);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
-  const [connectionState, setConnectionState] = useState<AvatarConnectionState>("inactive");
+  const [connectionState, setConnectionState] =
+    useState<AvatarConnectionState>("inactive");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [overlay, setOverlay] = useState<Overlay | null>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -122,7 +133,7 @@ export const Kiosk = () => {
 
     const avatarIdToUse = DEFAULT_AVATAR_ID ?? sessionDescriptor?.avatarId;
     if (!avatarIdToUse) {
-      alert("Missing avatar ID. Please set VITE_HEYGEN_AVATAR_ID in your .env file.");
+      alert("Missing avatar ID. Please set NEXT_PUBLIC_HEYGEN_AVATAR_ID in your .env file.");
       return;
     }
 
@@ -142,7 +153,10 @@ export const Kiosk = () => {
         }
       }
 
-      const avatar = new StreamingAvatar({ token: newDescriptor.token, basePath: HEYGEN_BASE_URL });
+      const avatar = new StreamingAvatar({
+        token: newDescriptor.token,
+        basePath: HEYGEN_BASE_URL,
+      });
       avatarRef.current = avatar;
 
       setConnectionState("connecting");
@@ -220,17 +234,14 @@ export const Kiosk = () => {
       }
     };
 
-    runGreeting().catch((error) => console.error(error));
+    void runGreeting();
   }, [activeSession, applyAssistantEvents, cart, connectionState, greeted, greetingPrompt, threadId]);
 
-  useEffect(
-    () => () => {
-      if (avatarRef.current) {
-        void avatarRef.current.stopAvatar().catch(() => undefined);
-      }
-    },
-    [],
-  );
+  useEffect(() => () => {
+    if (avatarRef.current) {
+      void avatarRef.current.stopAvatar().catch(() => undefined);
+    }
+  }, []);
 
   if (!started || !sessionDescriptor || !activeSession) {
     return (

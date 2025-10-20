@@ -1,3 +1,5 @@
+"use client";
+
 import type { FC } from "react";
 
 interface DirectionsOverlayProps {
@@ -15,7 +17,7 @@ export const DirectionsOverlay: FC<DirectionsOverlayProps> = ({ directions, onCl
     <div className="overlay__header">
       <h2>Pickup directions</h2>
       <button type="button" className="overlay__close" onClick={onClose} aria-label="Close overlay">
-        ✕
+        ×
       </button>
     </div>
     <div className="overlay__content overlay__content--columns">

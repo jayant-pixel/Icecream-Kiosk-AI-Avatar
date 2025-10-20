@@ -12,7 +12,7 @@ An end-to-end kiosk experience that combines:
 ```
 .
 ├── backend/    # Express + TypeScript API (HeyGen token proxy, Whisper STT, OpenAI Assistants)
-├── frontend/   # Vite + React kiosk UI with Streaming Avatar video and overlays
+├── frontend/   # Next.js 14 App Router kiosk UI with Streaming Avatar video and overlays
 └── Detailed doc for project build
 ```
 
@@ -37,17 +37,17 @@ Duplicate `backend/.env.example` and populate:
 | `OPENAI_API_KEY` | Secret from OpenAI. |
 | `OPENAI_ASSISTANT_ID` | Assistant v2 ID which contains kiosk instructions and tools. |
 | `OPENAI_ASSISTANT_MODEL` | Assistant model (default `gpt-4o-mini`). |
-| `CORS_ALLOWED_ORIGINS` | CSV of allowed origins (e.g. `http://localhost:5173`). |
+| `CORS_ALLOWED_ORIGINS` | CSV of allowed origins (e.g. `http://localhost:3000`). |
 
-### Frontend (`frontend/.env`)
+### Frontend (`frontend/.env.local`)
 
-Duplicate `frontend/.env.example` and set:
+Create `frontend/.env.local` (or update your environment) with:
 
 | Variable | Description |
 | --- | --- |
-| `VITE_HEYGEN_AVATAR_ID` | Streaming avatar ID to start sessions with. |
-| `VITE_BACKEND_URL` | Backend URL (default `http://localhost:8080`). |
-| `VITE_HEYGEN_BASE_URL` | Optional override for the HeyGen API base (default `https://api.heygen.com`). |
+| `NEXT_PUBLIC_HEYGEN_AVATAR_ID` | Streaming avatar ID to start sessions with. |
+| `NEXT_PUBLIC_BACKEND_URL` | Backend URL (default `http://localhost:8080`). |
+| `NEXT_PUBLIC_HEYGEN_BASE_URL` | Optional override for the HeyGen API base (default `https://api.heygen.com`). |
 
 ## Install & run
 
@@ -63,7 +63,7 @@ npm install
 npm run dev
 ```
 
-The Vite dev server proxies `/api` and `/webhooks` calls to the backend. Visit http://localhost:5173 to launch the kiosk. On the first successful connection the avatar greets the user; use the push-to-talk bar and the session controls to mute audio or end the conversation.
+The Next.js dev server runs at http://localhost:3000. Configure `NEXT_PUBLIC_BACKEND_URL` so the kiosk points to your Express API (for local development use `http://localhost:8080`). On the first successful connection the avatar greets the user; use the push-to-talk bar and the session controls to mute audio or end the conversation.
 
 ## Backend API overview
 
@@ -83,11 +83,11 @@ The backend configures the Assistant on startup so tool definitions stay in sync
 - Push-to-talk bar that captures microphone audio, calls Whisper, and feeds transcripts into the Assistant for tool routing.
 - One-tap session controls for ending the conversation or muting avatar audio.
 - Overlay manager for product recommendations, checkout totals, and pickup directions.
-- Avatar responses are spoken with `avatar.speak(...)`, using the AssistantÃ¢â‚¬â„¢s `spokenPrompt` when provided.
+- Avatar responses are spoken with `avatar.speak(...)`, using the Assistant's `spokenPrompt` when provided.
 
 ## HTTPS & kiosk mode
 
-Browsers require HTTPS for microphone/WebRTC when not running on `localhost`. For kiosk hardware, add [`vite-plugin-mkcert`](https://www.npmjs.com/package/vite-plugin-mkcert) and enable `server.https`. Chrome kiosk mode can be launched with:
+Browsers require HTTPS for microphone/WebRTC when not running on `localhost`. For kiosk hardware, provide HTTPS via a reverse proxy or `next dev --experimental-https`. Chrome kiosk mode can be launched with:
 
 ```bash
 chrome --kiosk https://your-kiosk-url
