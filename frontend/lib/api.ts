@@ -1,4 +1,8 @@
-﻿import type { BrainResponse, CartItem } from "./types";
+import type { BrainResponse, CartItem } from "./types";
+
+const BASE_API_URL = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "").replace(/\/$/, "");
+
+const withBaseUrl = (path: string) => `${BASE_API_URL}${path}`;
 
 const JSON_HEADERS = {
   "Content-Type": "application/json",
@@ -18,7 +22,7 @@ export interface SessionDescriptor {
 }
 
 export const newSession = async (avatarId?: string): Promise<SessionDescriptor> => {
-  const response = await fetch("/api/session/new", {
+  const response = await fetch(withBaseUrl("/api/session/new"), {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify({
@@ -33,7 +37,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   const formData = new FormData();
   formData.append("audio", audioBlob, "input.webm");
 
-  const response = await fetch("/api/stt/transcribe", {
+  const response = await fetch(withBaseUrl("/api/stt/transcribe"), {
     method: "POST",
     body: formData,
   });
@@ -48,7 +52,7 @@ export const brainRespond = async (
   threadId?: string,
   session?: { sessionId: string; accessToken: string },
 ): Promise<BrainResponse> => {
-  const response = await fetch("/api/brain/respond", {
+  const response = await fetch(withBaseUrl("/api/brain/respond"), {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify({

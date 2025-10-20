@@ -1,6 +1,9 @@
-﻿import { useCallback, useRef, useState } from "react";
-import { AudioRecorder } from "../lib/stt";
-import { transcribeAudio } from "../lib/api";
+"use client";
+
+import { useCallback, useRef, useState } from "react";
+
+import { transcribeAudio } from "@/lib/api";
+import { AudioRecorder } from "@/lib/stt";
 
 interface MicBarProps {
   disabled?: boolean;
@@ -24,7 +27,6 @@ export const MicBar = ({ disabled = false, onUtterance }: MicBarProps) => {
           }
         }
       } catch (error) {
-        // eslint-disable-next-line no-alert
         alert("Sorry, I couldn't hear that. Please try again.");
         console.error("STT error", error);
       } finally {
