@@ -8,10 +8,7 @@ WORKDIR /app
 
 # Install runtime deps
 RUN pip install --no-cache-dir \
-    "livekit-agents[anam]==1.2.0" \
-    livekit-plugins-openai==0.3.2 \
-    livekit-plugins-deepgram==0.3.2 \
-    livekit-plugins-cartesia==0.3.2 \
+    "livekit-agents[anam,openai,deepgram,cartesia]~=1.2.0" \
     httpx==0.27.2
 
 COPY scoop_agent.py /app/scoop_agent.py

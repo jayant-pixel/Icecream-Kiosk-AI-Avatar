@@ -9,9 +9,9 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@livekit/client": "^2.6.1",
-    "@livekit/components-react": "^2.3.1",
-    "@livekit/components-styles": "^1.2.1",
+    "livekit-client": "^2.15.11",
+    "@livekit/components-react": "^2.9.15",
+    "@livekit/components-styles": "^1.1.6",
     "next": "^15.3.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

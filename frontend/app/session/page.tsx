@@ -2,10 +2,18 @@
 
 import "@livekit/components-styles";
 
-import { LiveKitRoom, GridLayout, ParticipantTile, useTracks, useRoomContext } from "@livekit/components-react";
+import {
+  LiveKitRoom,
+  GridLayout,
+  useTracks,
+  useRoomContext,
+  StartMediaButton,
+  VideoTrack,
+} from "@livekit/components-react";
 import type { TrackReferenceOrPlaceholder } from "@livekit/components-react";
-import { Room, Track, type RemoteParticipant } from "livekit-client";
+import { RoomEvent, Track, type RemoteParticipant } from "livekit-client";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { OverlayDispatcher, type OverlayMessage } from "@/src/components/OverlayDispatcher";
 
@@ -47,7 +55,16 @@ const useAgentParticipant = () => {
 
   const agentTracks = useMemo(() => {
     if (!agent) return [] as TrackReferenceOrPlaceholder[];
-    return tracks.filter((track) => track.participant?.sid === agent.sid && track.source === Track.Source.Camera);
+    return tracks.filter((track) => {
+      if (track.participant?.sid !== agent.sid) {
+        return false;
+      }
+      const publicationKind = track.publication?.kind;
+      if (publicationKind === Track.Kind.Video) {
+        return true;
+      }
+      return track.source === Track.Source.Camera;
+    });
   }, [agent, tracks]);
 
   return { agent, agentTracks };
@@ -58,10 +75,24 @@ const MicButton = () => {
   const [enabled, setEnabled] = useState(false);
 
   const toggleMic = useCallback(async () => {
+    if (!room) {
+      return;
+    }
     const next = !enabled;
     await room.localParticipant.setMicrophoneEnabled(next);
     setEnabled(next);
   }, [enabled, room]);
+
+  useEffect(() => {
+    if (!room) {
+      return;
+    }
+    setEnabled(room.localParticipant.isMicrophoneEnabled);
+  }, [room]);
+
+  if (!room) {
+    return null;
+  }
 
   return (
     <button
@@ -75,12 +106,104 @@ const MicButton = () => {
   );
 };
 
+const AgentStage = () => {
+  const { agentTracks } = useAgentParticipant();
+
+  return (
+    <div className="session-room__video">
+      {agentTracks.length === 0 ? (
+        <div className="session-room__waiting" role="status" aria-live="polite">
+          Waiting for the avatar to join...
+        </div>
+      ) : (
+        <GridLayout tracks={agentTracks} className="session-room__grid">
+          {(trackRef) => (
+            <div
+              key={`${trackRef.participant.sid}-${trackRef.source}`}
+              className="session-room__tile"
+            >
+              <VideoTrack trackRef={trackRef} className="session-room__video-element" />
+            </div>
+          )}
+        </GridLayout>
+      )}
+    </div>
+  );
+};
+
+const EndSessionButton = () => {
+  const room = useRoomContext();
+  const router = useRouter();
+
+  const handleEnd = useCallback(() => {
+    if (!room) {
+      return;
+    }
+    room.disconnect();
+    router.push("/");
+  }, [room, router]);
+
+  if (!room) {
+    return null;
+  }
+
+  return (
+    <button type="button" className="session-end-button" onClick={handleEnd}>
+      End Session
+    </button>
+  );
+};
+
 const SessionShell = ({ children }: { children: React.ReactNode }) => (
   <div className="session-shell">
     <div className="session-shell__backdrop" />
     {children}
   </div>
 );
+
+const RoomEventHandlers = ({ onOverlay }: { onOverlay: (message: OverlayMessage | null) => void }) => {
+  const room = useRoomContext();
+  const decoder = useMemo(() => new TextDecoder(), []);
+
+  useEffect(() => {
+    if (!room) {
+      return;
+    }
+
+    const handleData = (payload: Uint8Array) => {
+      try {
+        const decoded = JSON.parse(decoder.decode(payload));
+        if (decoded?.type === "ui.overlay") {
+          onOverlay(decoded as OverlayMessage);
+        }
+      } catch (error) {
+        console.warn("Ignoring malformed data track message", error);
+      }
+    };
+
+    room.on(RoomEvent.DataReceived, handleData);
+    return () => {
+      room.off(RoomEvent.DataReceived, handleData);
+    };
+  }, [decoder, onOverlay, room]);
+
+  useEffect(() => {
+    if (!room) {
+      return;
+    }
+
+    const resetOverlay = () => {
+      onOverlay(null);
+    };
+
+    room.on(RoomEvent.Disconnected, resetOverlay);
+    return () => {
+      room.off(RoomEvent.Disconnected, resetOverlay);
+    };
+  }, [onOverlay, room]);
+
+  return null;
+};
 
 export default function SessionPage() {
   const [livekitUrl, setLivekitUrl] = useState<string | null>(null);
@@ -121,25 +244,6 @@ export default function SessionPage() {
     };
   }, []);
 
-  const handleConnected = useCallback((room: Room) => {
-    room.on("dataReceived", (payload) => {
-      try {
-        const decoded = JSON.parse(new TextDecoder().decode(payload));
-        if (decoded?.type === "ui.overlay") {
-          setOverlay(decoded as OverlayMessage);
-        }
-      } catch (error) {
-        console.warn("Ignoring malformed data track message", error);
-      }
-    });
-  }, []);
-
-  const handleDisconnected = useCallback(() => {
-    setOverlay(null);
-  }, []);
-
-  const { agentTracks } = useAgentParticipant();
-
   if (!livekitUrl || !token) {
     return (
       <SessionShell>
@@ -158,24 +262,16 @@ export default function SessionPage() {
         connect
         audio
         video
-        onConnected={handleConnected}
-        onDisconnected={handleDisconnected}
+        onDisconnected={() => setOverlay(null)}
         data-lk-theme="default"
         className="session-room"
       >
-        <div className="session-room__video">
-          <GridLayout tracks={agentTracks} className="session-room__grid">
-            {(trackRef) => (
-              <ParticipantTile
-                key={`${trackRef.participant.sid}-${trackRef.source}`}
-                trackRef={trackRef}
-                className="session-room__tile"
-              />
-            )}
-          </GridLayout>
-        </div>
+        <RoomEventHandlers onOverlay={setOverlay} />
+        <AgentStage />
         <div className="session-room__controls">
+          <StartMediaButton label="Enable Audio" />
           <MicButton />
+          <EndSessionButton />
         </div>
         <OverlayDispatcher message={overlay} />
       </LiveKitRoom>
