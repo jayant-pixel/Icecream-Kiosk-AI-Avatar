@@ -1,57 +1,53 @@
-import React, { useState } from "react";
-import { captureAudio } from "../lib/stt";
+﻿import { useCallback, useRef, useState } from "react";
+import { AudioRecorder } from "../lib/stt";
 import { transcribeAudio } from "../lib/api";
 
-type MicBarProps = {
-  onUtterance: (text: string) => void;
-};
+interface MicBarProps {
+  disabled?: boolean;
+  onUtterance: (text: string) => Promise<void> | void;
+}
 
-export function MicBar({ onUtterance }: MicBarProps) {
-  const [busy, setBusy] = useState(false);
-  const [input, setInput] = useState("");
+export const MicBar = ({ disabled = false, onUtterance }: MicBarProps) => {
+  const [isRecording, setIsRecording] = useState(false);
+  const recorderRef = useRef<AudioRecorder | null>(null);
 
-  const handleSpeak = async () => {
-    try {
-      setBusy(true);
-      const blob = await captureAudio(3);
-      const transcript = await transcribeAudio(blob);
-      if (transcript) {
-        onUtterance(transcript);
+  const handleToggleRecord = useCallback(async () => {
+    if (disabled) return;
+
+    if (isRecording) {
+      try {
+        if (recorderRef.current) {
+          const blob = await recorderRef.current.stop();
+          const transcript = await transcribeAudio(blob);
+          if (transcript.trim()) {
+            await onUtterance(transcript.trim());
+          }
+        }
+      } catch (error) {
+        // eslint-disable-next-line no-alert
+        alert("Sorry, I couldn't hear that. Please try again.");
+        console.error("STT error", error);
+      } finally {
+        setIsRecording(false);
+        recorderRef.current = null;
       }
-    } catch (error) {
-      console.error("STT error", error);
-      alert("Audio capture failed. Please try again.");
-    } finally {
-      setBusy(false);
+    } else {
+      recorderRef.current = new AudioRecorder();
+      await recorderRef.current.start();
+      setIsRecording(true);
     }
-  };
-
-  const handleSubmit = () => {
-    if (!input.trim()) return;
-    onUtterance(input.trim());
-    setInput("");
-  };
+  }, [disabled, isRecording, onUtterance]);
 
   return (
     <div className="mic-bar">
-      <button onClick={handleSpeak} disabled={busy} className="mic-bar__button">
-        {busy ? "Listening…" : "Hold to talk"}
-      </button>
-      <input
-        value={input}
-        onChange={(event) => setInput(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            handleSubmit();
-          }
-        }}
-        placeholder="Or type a request"
-        className="mic-bar__input"
-      />
-      <button onClick={handleSubmit} className="mic-bar__submit">
-        Send
+      <button
+        type="button"
+        className="button button--primary"
+        onClick={handleToggleRecord}
+        disabled={disabled}
+      >
+        {isRecording ? "Stop Listening" : "Tap to Talk"}
       </button>
     </div>
   );
-}
+};

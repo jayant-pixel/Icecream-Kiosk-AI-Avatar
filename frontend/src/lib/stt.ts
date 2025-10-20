@@ -1,39 +1,50 @@
-export async function captureAudio(durationSeconds = 3): Promise<Blob> {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    throw new Error("Microphone not supported in this browser");
+const SUPPORTED_MIME_TYPES = ["audio/webm; codecs=opus", "audio/webm", "audio/mp4"];
+
+const pickMimeType = () =>
+  SUPPORTED_MIME_TYPES.find((type) => MediaRecorder.isTypeSupported(type)) ?? "audio/webm";
+
+export class AudioRecorder {
+  private stream: MediaStream | null = null;
+  private recorder: MediaRecorder | null = null;
+  private chunks: BlobPart[] = [];
+  private stopPromise: Promise<void> | null = null;
+
+  async start() {
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = pickMimeType();
+    this.recorder = new MediaRecorder(this.stream, { mimeType });
+    this.chunks = [];
+
+    this.stopPromise = new Promise<void>((resolve, reject) => {
+      if (!this.recorder) {
+        return reject(new Error("Recorder not initialized"));
+      }
+
+      this.recorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size > 0) {
+          this.chunks.push(event.data);
+        }
+      });
+      this.recorder.addEventListener("stop", () => resolve());
+      this.recorder.addEventListener("error", (event) => reject(event.error));
+    });
+
+    this.recorder.start();
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-  const chunks: BlobPart[] = [];
+  async stop(): Promise<Blob> {
+    if (!this.recorder || !this.stream) {
+      throw new Error("Recording has not been started");
+    }
 
-  return await new Promise<Blob>((resolve, reject) => {
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    };
+    this.recorder.stop();
+    if (this.stopPromise) {
+      await this.stopPromise;
+    }
 
-    recorder.onerror = (event) => {
-      cleanup();
-      reject(event.error);
-    };
+    this.stream.getTracks().forEach((track) => track.stop());
 
-    recorder.onstop = () => {
-      cleanup();
-      resolve(new Blob(chunks, { type: "audio/webm" }));
-    };
-
-    const cleanup = () => {
-      stream.getTracks().forEach((track) => track.stop());
-    };
-
-    recorder.start();
-
-    setTimeout(() => {
-      if (recorder.state !== "inactive") {
-        recorder.stop();
-      }
-    }, durationSeconds * 1000);
-  });
+    return new Blob(this.chunks, { type: this.recorder.mimeType });
+  }
 }
+

@@ -1,49 +1,50 @@
-import React from "react";
-import type { ProductSummary } from "../lib/api";
+﻿import type { FC } from "react";
+import type { Product } from "../lib/types";
 
-type ProductOverlayProps = {
-  products: ProductSummary[];
-};
+interface ProductOverlayProps {
+  products: Product[];
+  onAddToCart: (product: Product) => void;
+  onClose: () => void;
+}
 
-export function ProductOverlay({ products }: ProductOverlayProps) {
-  if (!products.length) {
-    return (
-      <div className="overlay-card">
-        <h2>No matches yet</h2>
-        <p>Ask for a flavour and I will show what we have in stock.</p>
-      </div>
-    );
-  }
+const formatPrice = (priceCents: number) => `$${(priceCents / 100).toFixed(2)}`;
 
-  const handleAdd = (id: string) => {
-    const event = new CustomEvent("add-to-cart", { detail: { id } });
-    window.dispatchEvent(event);
-  };
-
-  return (
-    <div className="overlay-card">
-      <h2>Recommended treats</h2>
-      <div className="overlay-card__grid">
-        {products.map((product) => (
-          <article key={product.id} className="product-card">
-            <img
-              src={product.image_url || "/img/placeholder.svg"}
-              alt={product.name}
-              className="product-card__image"
-            />
-            <div className="product-card__body">
-              <h3>{product.name}</h3>
-              <p className="product-card__price">₹{(product.price_cents / 100).toFixed(2)}</p>
-              <button onClick={() => handleAdd(product.id)} className="product-card__cta">
-                Add to cart
-              </button>
-            </div>
-          </article>
-        ))}
-      </div>
-      <button className="overlay-card__close" onClick={() => window.dispatchEvent(new Event("close-overlay"))}>
-        Close
+export const ProductOverlay: FC<ProductOverlayProps> = ({ products, onAddToCart, onClose }) => (
+  <div className="overlay overlay--products">
+    <div className="overlay__header">
+      <h2>Popular picks for you</h2>
+      <button type="button" className="overlay__close" onClick={onClose} aria-label="Close overlay">
+        âœ•
       </button>
     </div>
-  );
-}
+    <div className="overlay__content overlay__content--grid">
+      {products.map((product) => (
+        <article key={product.id} className="product-card">
+          <div className="product-card__media">
+            <img
+              src={product.imageUrl}
+              alt={product.name}
+              loading="lazy"
+              onError={(event) => {
+                const target = event.currentTarget;
+                target.src = "https://dummyimage.com/320x320/ede9ff/4b3cc4&text=Sweet+Treat";
+              }}
+            />
+          </div>
+          <header className="product-card__header">
+            <h3>{product.name}</h3>
+            <p>{formatPrice(product.priceCents)}</p>
+          </header>
+          {product.description && <p className="product-card__description">{product.description}</p>}
+          <button
+            type="button"
+            className="button button--primary"
+            onClick={() => onAddToCart(product.id)}
+          >
+            Add to cart
+          </button>
+        </article>
+      ))}
+    </div>
+  </div>
+);

@@ -1,26 +1,40 @@
-import React from "react";
-import type { DirectionsPayload } from "../lib/api";
+import type { FC } from "react";
 
-type DirectionsOverlayProps = {
-  directions: DirectionsPayload;
-};
+interface DirectionsOverlayProps {
+  directions: {
+    displayName: string;
+    steps: string[];
+    bin: string;
+    mapSvgUrl?: string;
+  };
+  onClose: () => void;
+}
 
-export function DirectionsOverlay({ directions }: DirectionsOverlayProps) {
-  return (
-    <div className="overlay-card">
+export const DirectionsOverlay: FC<DirectionsOverlayProps> = ({ directions, onClose }) => (
+  <div className="overlay overlay--directions">
+    <div className="overlay__header">
       <h2>Pickup directions</h2>
-      <p className="directions__title">{directions.display_name}</p>
-      <ol className="directions__steps">
-        {directions.steps.map((step, index) => (
-          <li key={index}>{step}</li>
-        ))}
-      </ol>
-      {directions.map_svg_url && (
-        <img src={directions.map_svg_url} alt="Store map" className="directions__map" />
-      )}
-      <button className="overlay-card__close" onClick={() => window.dispatchEvent(new Event("close-overlay"))}>
-        Close
+      <button type="button" className="overlay__close" onClick={onClose} aria-label="Close overlay">
+        ✕
       </button>
     </div>
-  );
-}
+    <div className="overlay__content overlay__content--columns">
+      <section className="directions-panel">
+        <h3>{directions.displayName}</h3>
+        <ol>
+          {directions.steps.map((step, index) => (
+            <li key={index}>{step}</li>
+          ))}
+        </ol>
+        <p className="directions-panel__bin">Bin code: {directions.bin}</p>
+      </section>
+      <figure className="map-panel">
+        <img
+          src={directions.mapSvgUrl ?? "https://dummyimage.com/480x320/f5f3ff/4b3cc4&text=Store+Map"}
+          alt="Store map"
+          loading="lazy"
+        />
+      </figure>
+    </div>
+  </div>
+);

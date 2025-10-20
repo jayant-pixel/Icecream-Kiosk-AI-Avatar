@@ -1,28 +1,67 @@
-import React from "react";
+﻿import type { FC } from "react";
+import type { Product } from "../lib/types";
 import { ProductOverlay } from "./ProductOverlay";
 import { DirectionsOverlay } from "./DirectionsOverlay";
-import type { DirectionsPayload, ProductSummary } from "../lib/api";
 
-type ProductOverlayState = { type: "products"; data: ProductSummary[] };
-type DirectionsOverlayState = { type: "directions"; data: DirectionsPayload };
-type ChatOverlayState = { type: "chat"; data: string };
+export type Overlay =
+  | { type: "products"; products: Product[] }
+  | {
+      type: "directions";
+      directions: {
+        displayName: string;
+        steps: string[];
+        bin: string;
+        mapSvgUrl?: string;
+      };
+    }
+  | { type: "checkout"; receipt: { subtotal: number; tax: number; total: number } };
 
-export type Overlay = ProductOverlayState | DirectionsOverlayState | ChatOverlayState | null;
+interface OverlayManagerProps {
+  overlay: Overlay | null;
+  onAddToCart: (productId: string) => void;
+  onClose: () => void;
+}
 
-type OverlayManagerProps = {
-  overlay: Overlay;
-};
+const formatPrice = (value: number) => `$${(value / 100).toFixed(2)}`;
 
-export function OverlayManager({ overlay }: OverlayManagerProps) {
+export const OverlayManager: FC<OverlayManagerProps> = ({ overlay, onAddToCart, onClose }) => {
   if (!overlay) {
     return null;
   }
 
+  if (overlay.type === "products") {
+    return <ProductOverlay products={overlay.products} onAddToCart={onAddToCart} onClose={onClose} />;
+  }
+
+  if (overlay.type === "directions") {
+    return <DirectionsOverlay directions={overlay.directions} onClose={onClose} />;
+  }
+
   return (
-    <div className="overlay">
-      {overlay.type === "products" && <ProductOverlay products={overlay.data} />}
-      {overlay.type === "directions" && <DirectionsOverlay directions={overlay.data} />}
-      {overlay.type === "chat" && <p className="overlay__chat">{overlay.data}</p>}
+    <div className="overlay overlay--checkout">
+      <div className="overlay__header">
+        <h2>Order summary</h2>
+        <button type="button" className="overlay__close" onClick={onClose} aria-label="Close overlay">
+          âœ•
+        </button>
+      </div>
+      <div className="overlay__content overlay__content--stack">
+        <dl className="receipt">
+          <div>
+            <dt>Subtotal</dt>
+            <dd>{formatPrice(overlay.receipt.subtotal)}</dd>
+          </div>
+          <div>
+            <dt>Tax</dt>
+            <dd>{formatPrice(overlay.receipt.tax)}</dd>
+          </div>
+          <div>
+            <dt>Total</dt>
+            <dd className="receipt__total">{formatPrice(overlay.receipt.total)}</dd>
+          </div>
+        </dl>
+        <p className="receipt__hint">Show this total at checkout to complete your order.</p>
+      </div>
     </div>
   );
-}
+};

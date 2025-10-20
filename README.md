@@ -1,56 +1,98 @@
 # Icecream Kiosk AI Avatar
 
-This repository contains a full-stack demo kiosk that pairs an interactive HeyGen avatar with an OpenAI-powered intent brain and Whisper-based speech-to-text pipeline. The project follows the "Detailed doc for project build" specification included in this repo.
+An end-to-end kiosk experience that combines:
 
-## Structure
+- **HeyGen Streaming Avatar SDK** for real-time avatar video, lip-sync, and kiosk-friendly audio playback.
+- **OpenAI Assistants API** for conversational intelligence, tool calling, and contextual replies.
+- **OpenAI Whisper** for reliable push-to-talk speech recognition that feeds external tools.
+- Dynamic overlays (products, checkout summary, pickup directions) driven by Assistant tool decisions.
+
+## Monorepo layout
 
 ```
 .
-├── backend/    # Express + TypeScript API for HeyGen, Whisper, and tool routing
-├── frontend/   # React + Vite kiosk interface with LiveKit video & overlays
+├── backend/    # Express + TypeScript API (HeyGen token proxy, Whisper STT, OpenAI Assistants)
+├── frontend/   # Vite + React kiosk UI with Streaming Avatar video and overlays
 └── Detailed doc for project build
 ```
 
-## Backend
+## Prerequisites
 
-1. Duplicate `backend/.env.example` to `backend/.env` and populate:
-   - `HEYGEN_API_KEY`
-   - `OPENAI_API_KEY`
-   - Optional: `MAKE_PRODUCTS_HOOK`, `MAKE_ORDER_HOOK` for Make.com integrations
-2. Install dependencies (requires npm registry access):
+- Node.js 18+ and npm.
+- HeyGen API key with access to the **Streaming Avatar** feature.
+- OpenAI API key and an Assistants v2 ID configured with the kiosk tools.
 
-   ```bash
-   cd backend
-   npm install
-   ```
+## Environment configuration
 
-3. Start the API:
+### Backend (`backend/.env`)
 
-   ```bash
-   npm run dev
-   ```
+Duplicate `backend/.env.example` and populate:
 
-   The server exposes routes for creating HeyGen sessions, forwarding audio to Whisper, routing LLM tool calls, and returning kiosk overlays.
+| Variable | Description |
+| --- | --- |
+| `PORT` | API port (default `8080`). |
+| `HEYGEN_API_KEY` | Secret from the HeyGen dashboard (Streaming Avatar enabled). |
+| `HEYGEN_BASE_URL` | Defaults to `https://api.heygen.com`. |
+| `HEYGEN_AVATAR_ID` | Optional default streaming avatar ID. |
+| `OPENAI_API_KEY` | Secret from OpenAI. |
+| `OPENAI_ASSISTANT_ID` | Assistant v2 ID which contains kiosk instructions and tools. |
+| `OPENAI_ASSISTANT_MODEL` | Assistant model (default `gpt-4o-mini`). |
+| `CORS_ALLOWED_ORIGINS` | CSV of allowed origins (e.g. `http://localhost:5173`). |
 
-## Frontend
+### Frontend (`frontend/.env`)
 
-1. Configure `VITE_HEYGEN_AVATAR_ID` in `frontend/.env` with your HeyGen avatar ID (v3).
-2. Install dependencies:
+Duplicate `frontend/.env.example` and set:
 
-   ```bash
-   cd frontend
-   npm install
-   ```
+| Variable | Description |
+| --- | --- |
+| `VITE_HEYGEN_AVATAR_ID` | Streaming avatar ID to start sessions with. |
+| `VITE_BACKEND_URL` | Backend URL (default `http://localhost:8080`). |
+| `VITE_HEYGEN_BASE_URL` | Optional override for the HeyGen API base (default `https://api.heygen.com`). |
 
-3. Run the development server:
+## Install & run
 
-   ```bash
-   npm run dev
-   ```
+```bash
+# Backend
+cd backend
+npm install
+npm run dev
 
-   The Vite dev server proxies `/api/*` calls to `http://localhost:8080` by default. The UI connects to LiveKit, renders the HeyGen avatar stream, and surfaces product/direction overlays triggered by the brain endpoint.
+# Frontend (new terminal)
+cd ../frontend
+npm install
+npm run dev
+```
+
+The Vite dev server proxies `/api` and `/webhooks` calls to the backend. Visit http://localhost:5173 to launch the kiosk. On the first successful connection the avatar greets the user; use the push-to-talk bar and the session controls to mute audio or end the conversation.
+
+## Backend API overview
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/session/new` | Request a short-lived Streaming Avatar access token. |
+| `POST` | `/api/stt/transcribe` | Send audio to OpenAI Whisper and return the transcript. |
+| `POST` | `/api/brain/respond` | Run the Assistant, execute tool calls, and produce UI directives + speech. |
+| `POST` | `/webhooks/openai/tool` | Utility webhook that mirrors tool handling (reserved for future integrations). |
+| `GET` | `/health` | Basic readiness probe. |
+
+The backend configures the Assistant on startup so tool definitions stay in sync with the kiosk behaviour.
+
+## Frontend features
+
+- React kiosk UI powered by `@heygen/streaming-avatar` for low-latency video and speech playback.
+- Push-to-talk bar that captures microphone audio, calls Whisper, and feeds transcripts into the Assistant for tool routing.
+- One-tap session controls for ending the conversation or muting avatar audio.
+- Overlay manager for product recommendations, checkout totals, and pickup directions.
+- Avatar responses are spoken with `avatar.speak(...)`, using the AssistantÃ¢â‚¬â„¢s `spokenPrompt` when provided.
+
+## HTTPS & kiosk mode
+
+Browsers require HTTPS for microphone/WebRTC when not running on `localhost`. For kiosk hardware, add [`vite-plugin-mkcert`](https://www.npmjs.com/package/vite-plugin-mkcert) and enable `server.https`. Chrome kiosk mode can be launched with:
+
+```bash
+chrome --kiosk https://your-kiosk-url
+```
 
 ## Offline environments
 
-If npm registry access is blocked (e.g., `npm ERR! code E403`), fetch dependencies in a networked environment, copy the resulting `node_modules` or an `.tgz` mirror into this workspace, and rerun `npm install --offline`.
-
+If npm registry access is blocked (e.g., `npm ERR! code E403`), install dependencies in a network-friendly workspace, copy the resulting `node_modules` directories (or cached tarballs) into this project, and rerun `npm install --offline` inside each package.

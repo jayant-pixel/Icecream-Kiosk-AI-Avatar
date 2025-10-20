@@ -1,69 +1,54 @@
-import React, { useEffect, useRef } from "react";
-import { connect, Room } from "livekit-client";
-import StreamingAvatar from "@heygen/streaming-avatar";
-import type { SessionDetails } from "../lib/api";
+import { useEffect, useRef } from "react";
 
-type AvatarStreamProps = {
-  session: SessionDetails;
-  avatarId: string;
-  onReady: (deps: { room: Room; avatar: StreamingAvatar }) => void;
-};
+export type AvatarConnectionState = "inactive" | "connecting" | "connected" | "error";
 
-export function AvatarStream({ session, avatarId, onReady }: AvatarStreamProps) {
+interface AvatarStreamProps {
+  stream: MediaStream | null;
+  state: AvatarConnectionState;
+  error?: string | null;
+  muted?: boolean;
+}
+
+export const AvatarStream = ({ stream, state, error, muted = false }: AvatarStreamProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    let room: Room | null = null;
-    let avatar: StreamingAvatar | null = null;
-    let cancelled = false;
+    const element = videoRef.current;
+    if (!element) return;
 
-    (async () => {
-      try {
-        room = await connect(session.livekitUrl, session.accessToken);
-        if (cancelled) {
-          room.disconnect();
-          return;
-        }
+    element.muted = muted;
+    element.volume = muted ? 0 : 1;
 
-        room.on("trackSubscribed", (track) => {
-          if (track.kind === "video" && videoRef.current) {
-            videoRef.current.srcObject = new MediaStream([track.mediaStreamTrack]);
-          }
+    if (!stream) {
+      element.srcObject = null;
+      return;
+    }
+
+    const currentStream = stream;
+    if (element.srcObject !== currentStream) {
+      element.srcObject = currentStream;
+      element
+        .play()
+        .catch(() => {
+          // Autoplay with audio can fail until user interacts; the Start button counts as a gesture
         });
+    }
+  }, [stream, muted]);
 
-        avatar = new StreamingAvatar({ token: session.accessToken });
-        await avatar.createStartAvatar({
-          avatarId,
-          version: "v3",
-          language: "en",
-          quality: "high",
-        });
+  const showOverlay = state !== "connected" || error;
+  const statusLabel = (() => {
+    if (error) return error;
+    if (state === "connecting") return "Connecting to avatar…";
+    if (state === "inactive") return "Tap start to connect to the avatar";
+    return null;
+  })();
 
-        if (!cancelled) {
-          onReady({ room, avatar });
-        }
-      } catch (error) {
-        console.error("Failed to initialise avatar stream", error);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      try {
-        avatar?.stop?.();
-      } catch (error) {
-        console.warn("avatar stop failed", error);
-      }
-      try {
-        room?.disconnect?.();
-      } catch (error) {
-        console.warn("room disconnect failed", error);
-      }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-    };
-  }, [session, avatarId, onReady]);
-
-  return <video ref={videoRef} autoPlay muted playsInline className="avatar-stream" />;
-}
+  return (
+    <div className="avatar-stage">
+      <video ref={videoRef} className="avatar-stage__video" autoPlay playsInline />
+      {showOverlay && statusLabel && (
+        <div className="avatar-stage__error">{statusLabel}</div>
+      )}
+    </div>
+  );
+};
