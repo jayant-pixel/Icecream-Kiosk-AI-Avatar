@@ -5,15 +5,14 @@ An end-to-end kiosk experience that combines:
 - **HeyGen Streaming Avatar SDK** for real-time avatar video, lip-sync, and kiosk-friendly audio playback.
 - **OpenAI Assistants API** for conversational intelligence, tool calling, and contextual replies.
 - **OpenAI Whisper** for reliable push-to-talk speech recognition that feeds external tools.
-- Dynamic overlays (products, checkout summary, pickup directions) driven by Assistant tool decisions.
+- Dynamic overlays (products and pickup directions) driven by Assistant tool decisions.
 
 ## Monorepo layout
 
 ```
-.
-├── backend/    # Express + TypeScript API (HeyGen token proxy, Whisper STT, OpenAI Assistants)
-├── frontend/   # Next.js 14 App Router kiosk UI with Streaming Avatar video and overlays
-└── Detailed doc for project build
+backend/    # Express + TypeScript API (HeyGen token proxy, Whisper STT, OpenAI Assistants)
+frontend/   # Next.js 14 App Router kiosk UI with Streaming Avatar video and overlays
+Detailed doc for project build
 ```
 
 ## Prerequisites
@@ -82,7 +81,7 @@ The backend configures the Assistant on startup so tool definitions stay in sync
 - React kiosk UI powered by `@heygen/streaming-avatar` for low-latency video and speech playback.
 - Push-to-talk bar that captures microphone audio, calls Whisper, and feeds transcripts into the Assistant for tool routing.
 - One-tap session controls for ending the conversation or muting avatar audio.
-- Overlay manager for product recommendations, checkout totals, and pickup directions.
+- Overlay manager for product recommendations and pickup directions.
 - Avatar responses are spoken with `avatar.speak(...)`, using the Assistant's `spokenPrompt` when provided.
 
 ## HTTPS & kiosk mode
@@ -96,3 +95,4 @@ chrome --kiosk https://your-kiosk-url
 ## Offline environments
 
 If npm registry access is blocked (e.g., `npm ERR! code E403`), install dependencies in a network-friendly workspace, copy the resulting `node_modules` directories (or cached tarballs) into this project, and rerun `npm install --offline` inside each package.
+

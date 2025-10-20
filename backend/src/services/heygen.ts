@@ -51,7 +51,7 @@ export const speakWithSession = async (
     },
     body: JSON.stringify({
       session_id: sessionId,
-      task_type: options.taskType ?? "talk",
+      task_type: options.taskType ?? "repeat",
       text,
       task_mode: options.mode ?? "async",
     }),

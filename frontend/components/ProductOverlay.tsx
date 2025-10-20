@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import type { FC } from "react";
 
@@ -34,18 +34,23 @@ export const ProductOverlay: FC<ProductOverlayProps> = ({ products, onAddToCart,
               }}
             />
           </div>
-          <header className="product-card__header">
-            <h3>{product.name}</h3>
-            <p>{formatPrice(product.priceCents)}</p>
-          </header>
-          {product.description && <p className="product-card__description">{product.description}</p>}
-          <button
-            type="button"
-            className="button button--primary"
-            onClick={() => onAddToCart(product.id)}
-          >
-            Add to cart
-          </button>
+          <div className="product-card__body">
+            <header className="product-card__header">
+              <h3>{product.name}</h3>
+              <p>{formatPrice(product.priceCents)}</p>
+            </header>
+            {product.description && <p className="product-card__description">{product.description}</p>}
+            {product.displayNames.length > 0 && (
+              <ul className="product-card__locations" aria-label="Display locations">
+                {product.displayNames.map((location) => (
+                  <li key={location}>{location}</li>
+                ))}
+              </ul>
+            )}
+            <button type="button" className="button button--primary" onClick={() => onAddToCart(product.id)}>
+              Add to cart
+            </button>
+          </div>
         </article>
       ))}
     </div>

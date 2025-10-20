@@ -1,6 +1,14 @@
-﻿import type { AssistantEvent, CartItem, Product } from "../types";
+import type { AssistantEvent, CartItem, Product } from "../types";
 import { env } from "../config/env";
 import { logger } from "../utils/logger";
+
+type ToolCallResult = {
+  output: unknown;
+  event: AssistantEvent;
+  updatedCart?: CartItem[];
+};
+
+const PLACEHOLDER_IMAGE = "https://dummyimage.com/320x320/ede9ff/4b3cc4&text=Scoop+Haven";
 
 const DEFAULT_PRODUCTS: Product[] = [
   {
@@ -8,31 +16,55 @@ const DEFAULT_PRODUCTS: Product[] = [
     name: "Chocolate Cone",
     description: "Classic cocoa-dipped waffle cone with rich chocolate ice cream.",
     priceCents: 1200,
-    imageUrl: "/assets/products/chocolate-cone.png",
-    bin: "FZ-A2-B4",
+    imageUrl: PLACEHOLDER_IMAGE,
+    displayNames: ["Freezer A2 - Upper Shelf"],
+    primaryDisplayName: "Freezer A2 - Upper Shelf",
   },
   {
     id: "p2",
     name: "Vanilla Cup",
     description: "Madagascar vanilla in a single-serve cup.",
     priceCents: 900,
-    imageUrl: "/assets/products/vanilla-cup.png",
-    bin: "FZ-B1-A1",
+    imageUrl: PLACEHOLDER_IMAGE,
+    displayNames: ["Front Counter Chill Case"],
+    primaryDisplayName: "Front Counter Chill Case",
   },
   {
     id: "p3",
     name: "Strawberry Pint",
     description: "Fresh strawberry compote folded into creamy goodness.",
     priceCents: 1800,
-    imageUrl: "/assets/products/strawberry-pint.png",
-    bin: "FZ-A2-C2",
+    imageUrl: PLACEHOLDER_IMAGE,
+    displayNames: ["Freezer A3 - Middle Shelf"],
+    primaryDisplayName: "Freezer A3 - Middle Shelf",
   },
 ];
 
-const priceLookup = new Map(DEFAULT_PRODUCTS.map((product) => [product.id, product.priceCents]));
-const DEFAULT_PRODUCT = DEFAULT_PRODUCTS[0]!;
+const priceLookup = new Map<string, number>();
+const displayNameLookup = new Map<string, string>();
+const locationLookup = new Map<string, string>();
 
-const callWebhook = async <T>(url: string | undefined, payload: unknown): Promise<T | null> => {
+const registerProduct = (product: Product) => {
+  priceLookup.set(product.id, product.priceCents);
+  displayNameLookup.set(product.id, product.primaryDisplayName);
+  product.displayNames.forEach((location) => {
+    const normalized = location.toLowerCase();
+    if (!locationLookup.has(normalized)) {
+      locationLookup.set(normalized, location);
+    }
+  });
+};
+
+DEFAULT_PRODUCTS.forEach(registerProduct);
+
+const DEFAULT_PRODUCT = DEFAULT_PRODUCTS[0]!;
+const DEFAULT_DIRECTIONS_HINT =
+  "Head to the main freezer aisle and follow the signage for Scoop Haven displays.";
+
+const callWebhook = async <T>(
+  url: string | undefined,
+  payload: Record<string, unknown>,
+): Promise<T | null> => {
   if (!url) {
     return null;
   }
@@ -61,38 +93,67 @@ const callWebhook = async <T>(url: string | undefined, payload: unknown): Promis
   }
 };
 
+const ensureDisplayNames = (names: unknown): { list: string[]; primary: string } => {
+  if (Array.isArray(names)) {
+    const cleaned = names
+      .map((value) => (typeof value === "string" ? value.trim() : String(value ?? "")))
+      .filter((value) => value.length > 0);
+    if (cleaned.length > 0) {
+      return { list: cleaned, primary: cleaned[0]! };
+    }
+  }
+
+  if (typeof names === "string" && names.trim().length > 0) {
+    const trimmed = names.trim();
+    return {
+      list: [trimmed],
+      primary: trimmed,
+    };
+  }
+
+  return {
+    list: [DEFAULT_PRODUCT.primaryDisplayName],
+    primary: DEFAULT_PRODUCT.primaryDisplayName,
+  };
+};
+
 const normalizeProduct = (raw: Record<string, unknown>): Product => {
-  const id = String(raw.id ?? "").trim();
+  const id = String(raw.id ?? "").trim() || DEFAULT_PRODUCT.id;
   const name = String(raw.name ?? DEFAULT_PRODUCT.name);
   const description = raw.description ? String(raw.description) : undefined;
   const priceCandidate =
     typeof raw.priceCents === "number"
       ? raw.priceCents
       : typeof raw.price_cents === "number"
-        ? (raw.price_cents as number)
+        ? Number(raw.price_cents)
         : undefined;
   const priceCents = Number.isFinite(priceCandidate) ? Number(priceCandidate) : DEFAULT_PRODUCT.priceCents;
   const imageUrl =
     typeof raw.imageUrl === "string"
       ? raw.imageUrl
       : typeof raw.image_url === "string"
-        ? (raw.image_url as string)
-        : "/assets/products/placeholder.png";
-  const bin = typeof raw.bin === "string" && raw.bin ? (raw.bin as string) : DEFAULT_PRODUCT.bin;
+        ? String(raw.image_url)
+        : PLACEHOLDER_IMAGE;
 
-  return {
-    id: id || DEFAULT_PRODUCT.id,
+  const { list: displayNames, primary: primaryDisplayName } = ensureDisplayNames(raw.displayName);
+
+  const product: Product = {
+    id,
     name,
-    description,
     priceCents,
     imageUrl,
-    bin,
+    displayNames,
+    primaryDisplayName,
+    ...(description ? { description } : {}),
   };
+
+  registerProduct(product);
+  return product;
 };
 
 const fallBackProducts = (query: string): Product[] => {
-  const q = query.trim().toLowerCase();
-  if (!q) {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) {
     return DEFAULT_PRODUCTS;
   }
 
@@ -100,17 +161,24 @@ const fallBackProducts = (query: string): Product[] => {
     const name = product.name.toLowerCase();
     const description = product.description?.toLowerCase() ?? "";
     return (
-      name.includes(q) ||
-      description.includes(q) ||
-      q.split(/\s+/).some((term) => name.includes(term))
+      name.includes(trimmed) ||
+      description.includes(trimmed) ||
+      trimmed.split(/\s+/).some((term) => name.includes(term))
     );
   });
 };
 
 const fetchProducts = async (query: string): Promise<Product[]> => {
+  const requestText = query.trim()
+    ? `Guest request: "${query}". Respond with JSON { "products": [...] } where each product includes id, name, description, priceCents (integer cents), imageUrl, and displayName array describing the display locations.`
+    : "Provide a curated list of popular Scoop Haven treats with the fields id, name, description, priceCents, imageUrl, and displayName array.";
+
   const remote = await callWebhook<{ products?: Record<string, unknown>[] }>(
     env.integrations.productsWebhook,
-    { query },
+    {
+      webhook: "products",
+      query: requestText,
+    },
   );
 
   if (remote?.products && Array.isArray(remote.products) && remote.products.length > 0) {
@@ -146,63 +214,50 @@ const updateCart = (cart: CartItem[], productId: string, qty: number): CartItem[
   ];
 };
 
-const computeTotals = async (cart: CartItem[]) => {
-  const remote = await callWebhook<{
-    subtotal?: number;
-    tax?: number;
-    total?: number;
-  }>(env.integrations.checkoutWebhook, { cart });
+const directionsForDisplay = async (displayName: string) => {
+  const normalized =
+    locationLookup.get(displayName.toLowerCase()) ??
+    displayNameLookup.get(displayName) ??
+    displayName;
 
-  if (remote && typeof remote.total === "number") {
-    return {
-      subtotal: Number(remote.subtotal ?? 0),
-      tax: Number(remote.tax ?? 0),
-      total: Number(remote.total),
+  const location = (normalized && normalized.trim()) || DEFAULT_PRODUCT.primaryDisplayName;
+
+  const remote = await callWebhook<{
+    directions?: Array<{ displayName?: string; mapImage?: string; hint?: string }>;
+  }>(env.integrations.directionsWebhook, {
+    webhook: "directions",
+    displayName: location,
+    query: `Guest needs pickup guidance for "${location}". Respond with JSON { "directions": [ { "displayName": "...", "mapImage": "...", "hint": "..." } ] }.`,
+  });
+
+  if (remote?.directions && Array.isArray(remote.directions) && remote.directions.length > 0) {
+    const [first] = remote.directions;
+    const response: { displayName: string; hint?: string; mapImage?: string } = {
+      displayName:
+        (typeof first?.displayName === "string" && first.displayName.trim().length > 0
+          ? first.displayName.trim()
+          : location),
     };
+
+    if (typeof first?.hint === "string" && first.hint.trim().length > 0) {
+      response.hint = first.hint.trim();
+    }
+
+    if (typeof first?.mapImage === "string" && first.mapImage.trim().length > 0) {
+      response.mapImage = first.mapImage.trim();
+    }
+
+    return response;
   }
 
-  const subtotal = cart.reduce((sum, item) => sum + item.qty * item.priceCents, 0);
-  const tax = Math.round(subtotal * 0.05);
-  const total = subtotal + tax;
-  return { subtotal, tax, total };
-};
-
-const directionsForBin = async (bin: string) => {
-  const remote = await callWebhook<{
-    display_name?: string;
-    steps?: string[];
-    bin?: string;
-    map_svg_url?: string;
-  }>(env.integrations.directionsWebhook, { bin });
-
-  if (remote) {
-    return {
-      displayName: remote.display_name ?? remote.bin ?? DEFAULT_PRODUCT.bin,
-      steps:
-        Array.isArray(remote.steps) && remote.steps.length > 0
-          ? remote.steps
-          : [
-              "Walk straight 5 meters past the central display.",
-              "Turn left at the freezer aisle.",
-              `Locate bin ${bin} on the second shelf.`,
-            ],
-      bin: remote.bin ?? bin,
-      mapSvgUrl: remote.map_svg_url ?? undefined,
-    };
-  }
-
-  const fallback = DEFAULT_PRODUCTS.find((item) => item.bin === bin);
   return {
-    displayName: fallback
-      ? `${fallback.name} pickup at freezer bin ${fallback.bin}`
-      : `Pickup at freezer bin ${bin}`,
+    displayName: location,
+    hint: DEFAULT_DIRECTIONS_HINT,
     steps: [
-      "Walk straight 5 meters past the central display.",
-      "Turn left at the freezer aisle.",
-      `Locate bin ${bin} on the second shelf.`,
+      "Head toward the main freezer aisle.",
+      `Follow the signage for "${location}".`,
+      "The display will be highlighted with Scoop Haven branding.",
     ],
-    bin,
-    mapSvgUrl: "/assets/maps/icecream-aisle.svg",
   };
 };
 
@@ -212,13 +267,14 @@ export const assistantTools = {
       type: "function" as const,
       function: {
         name: "find_products",
-        description: "Search the ice-cream catalog using a natural language query.",
+        description:
+          "Search the ice-cream catalogue and return menu items with pricing and display locations.",
         parameters: {
           type: "object",
           properties: {
             query: {
               type: "string",
-              description: "The keywords describing the product or flavor the guest wants.",
+              description: "Natural language request describing flavours or products the guest wants.",
             },
           },
           required: ["query"],
@@ -250,43 +306,17 @@ export const assistantTools = {
     {
       type: "function" as const,
       function: {
-        name: "checkout",
-        description: "Summarise the cart totals with tax for the guest.",
-        parameters: {
-          type: "object",
-          properties: {
-            cart: {
-              type: "array",
-              description: "Current cart contents.",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string" },
-                  qty: { type: "integer" },
-                  price_cents: { type: "integer" },
-                },
-                required: ["id", "qty", "price_cents"],
-              },
-            },
-          },
-          required: ["cart"],
-        },
-      },
-    },
-    {
-      type: "function" as const,
-      function: {
         name: "get_directions",
-        description: "Describe how to reach the freezer bin for pickup.",
+        description: "Describe how to reach the product's display location inside the store.",
         parameters: {
           type: "object",
           properties: {
-            bin: {
+            display_name: {
               type: "string",
-              description: "The freezer bin code, for example FZ-A2-B4.",
+              description: "The display name or location provided with the product recommendation.",
             },
           },
-          required: ["bin"],
+          required: ["display_name"],
         },
       },
     },
@@ -317,54 +347,43 @@ export const assistantTools = {
         const productId = String(args.product_id ?? DEFAULT_PRODUCT.id);
         const qty = Number.isFinite(args.qty) ? Number(args.qty) : 1;
         const updatedCart = updateCart(cart, productId, qty);
+        const displayName = displayNameLookup.get(productId);
+        const spokenPrompt = displayName
+          ? `All set. ${displayName} has been added to your order.`
+          : "All set. I've added that to your order.";
+        const event: AssistantEvent = displayName
+          ? {
+              type: "add_to_cart",
+              cart: updatedCart,
+              productId,
+              qty,
+              displayName,
+              spokenPrompt,
+            }
+          : {
+              type: "add_to_cart",
+              cart: updatedCart,
+              productId,
+              qty,
+              spokenPrompt,
+            };
         return {
           output: { cart: updatedCart },
-          event: {
-            type: "add_to_cart",
-            cart: updatedCart,
-            productId,
-            qty,
-            spokenPrompt: "All set. I've added that to your order.",
-          },
+          event,
           updatedCart,
         };
       }
-      case "checkout": {
-        const normalizedCart: CartItem[] = Array.isArray(args.cart)
-          ? (args.cart as Array<Record<string, unknown>>).map((item) => {
-              const id = String(item.id ?? "") || DEFAULT_PRODUCT.id;
-              const qty = Number(item.qty ?? 1) || 1;
-              const rawPrice = item.priceCents;
-              const legacyPrice = item["price_cents"];
-              const priceCents =
-                typeof rawPrice === "number"
-                  ? rawPrice
-                  : typeof legacyPrice === "number"
-                    ? (legacyPrice as number)
-                    : priceLookup.get(id) ?? DEFAULT_PRODUCT.priceCents;
-              return { id, qty, priceCents };
-            })
-          : cart;
-
-        const totals = await computeTotals(normalizedCart);
-        return {
-          output: { receipt: totals },
-          event: {
-            type: "checkout",
-            receipt: totals,
-            spokenPrompt: `Your total comes to $${(totals.total / 100).toFixed(2)}. Would you like anything else?`,
-          },
-        };
-      }
       case "get_directions": {
-        const bin = String(args.bin ?? DEFAULT_PRODUCT.bin);
-        const directions = await directionsForBin(bin);
+        const displayName = String(args.display_name ?? DEFAULT_PRODUCT.primaryDisplayName);
+        const directions = await directionsForDisplay(displayName);
         return {
           output: directions,
           event: {
             type: "directions",
             directions,
-            spokenPrompt: `You'll find it at ${directions.displayName}.`,
+            spokenPrompt: directions.hint
+              ? directions.hint
+              : `You'll find it at ${directions.displayName}.`,
           },
         };
       }

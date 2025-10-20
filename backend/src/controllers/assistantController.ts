@@ -17,12 +17,12 @@ export const brainRespondHandler = async (req: Request, res: Response) => {
       result.events[result.events.length - 1]?.spokenPrompt ?? result.response;
 
     if (session?.sessionId && session?.accessToken) {
-      void speakWithSession(session.sessionId, session.accessToken, finalSpokenPrompt).catch(
-        (error: unknown) => {
-          // Do not fail the request if speech dispatch fails; just log for observability
-          console.error("Failed to dispatch speech task to HeyGen", error);
-        },
-      );
+      void speakWithSession(session.sessionId, session.accessToken, finalSpokenPrompt, {
+        taskType: "repeat",
+      }).catch((error: unknown) => {
+        // Do not fail the request if speech dispatch fails; just log for observability
+        console.error("Failed to dispatch speech task to HeyGen", error);
+      });
     }
 
     return res.json(result);
@@ -33,7 +33,7 @@ export const brainRespondHandler = async (req: Request, res: Response) => {
   }
 };
 
-export const toolWebhookHandler = (req: Request, res: Response) => {
+export const toolWebhookHandler = async (req: Request, res: Response) => {
   const { name, arguments: args = {}, cart = [] } = req.body ?? {};
 
   if (!name || typeof name !== "string") {
@@ -41,7 +41,7 @@ export const toolWebhookHandler = (req: Request, res: Response) => {
   }
 
   try {
-    const { output, event, updatedCart } = assistantTools.handle(name, args, cart);
+    const { output, event, updatedCart } = await assistantTools.handle(name, args, cart);
     return res.json({
       output,
       event,

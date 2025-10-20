@@ -33,13 +33,13 @@ export const env = {
     apiKey: requireEnv("OPENAI_API_KEY"),
     model: process.env.OPENAI_ASSISTANT_MODEL ?? "gpt-4o-mini",
     assistantName: process.env.OPENAI_ASSISTANT_NAME ?? "Icecream Kiosk Assistant",
+    assistantId: process.env.OPENAI_ASSISTANT_ID,
   },
   cors: {
     origins: optionalList(process.env.CORS_ALLOWED_ORIGINS),
   },
   integrations: {
     productsWebhook: process.env.PRODUCTS_WEBHOOK_URL,
-    checkoutWebhook: process.env.CHECKOUT_WEBHOOK_URL,
     directionsWebhook: process.env.DIRECTIONS_WEBHOOK_URL,
   },
 } as const;

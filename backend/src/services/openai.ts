@@ -1,4 +1,4 @@
-﻿import OpenAI from "openai";
+import OpenAI from "openai";
 import type { TextContentBlock } from "openai/resources/beta/threads/messages";
 import { toFile } from "openai/uploads";
 import type { AssistantEvent, BrainResponseBody, CartItem } from "../types";
@@ -19,7 +19,6 @@ export const transcribeAudio = async (buffer: Buffer, filename: string, mimeType
   });
   return response.text.trim();
 };
-
 const extractAssistantText = (messages: Awaited<
   ReturnType<typeof openai.beta.threads.messages.list>
 >["data"]): string => {
@@ -133,3 +132,4 @@ export const runAssistant = async (
     events,
   };
 };
+

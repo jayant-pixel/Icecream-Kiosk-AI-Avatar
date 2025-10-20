@@ -1,10 +1,11 @@
-﻿export interface Product {
+export interface Product {
   id: string;
   name: string;
   description?: string;
   priceCents: number;
   imageUrl: string;
-  bin: string;
+  displayNames: string[];
+  primaryDisplayName: string;
 }
 
 export interface CartItem {
@@ -13,12 +14,7 @@ export interface CartItem {
   priceCents: number;
 }
 
-export type AssistantEventType =
-  | "show_products"
-  | "add_to_cart"
-  | "checkout"
-  | "directions"
-  | "chat";
+export type AssistantEventType = "show_products" | "add_to_cart" | "directions" | "chat";
 
 interface AssistantEventBase {
   spokenPrompt?: string;
@@ -31,18 +27,15 @@ export type AssistantEvent =
       cart: CartItem[];
       productId: string;
       qty: number;
-    } & AssistantEventBase)
-  | ({
-      type: "checkout";
-      receipt: { subtotal: number; tax: number; total: number };
+      displayName?: string;
     } & AssistantEventBase)
   | ({
       type: "directions";
       directions: {
         displayName: string;
-        steps: string[];
-        bin: string;
-        mapSvgUrl?: string;
+        hint?: string;
+        mapImage?: string;
+        steps?: string[];
       };
     } & AssistantEventBase)
   | ({ type: "chat" } & AssistantEventBase);

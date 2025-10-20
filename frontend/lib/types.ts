@@ -4,7 +4,8 @@ export interface Product {
   description?: string;
   priceCents: number;
   imageUrl: string;
-  bin: string;
+  displayNames: string[];
+  primaryDisplayName: string;
 }
 
 export interface CartItem {
@@ -24,20 +25,16 @@ export type AssistantEvent =
       cart: CartItem[];
       productId: string;
       qty: number;
-      spokenPrompt?: string;
-    }
-  | {
-      type: "checkout";
-      receipt: { subtotal: number; tax: number; total: number };
+      displayName?: string;
       spokenPrompt?: string;
     }
   | {
       type: "directions";
       directions: {
         displayName: string;
-        steps: string[];
-        bin: string;
-        mapSvgUrl?: string;
+        hint?: string;
+        mapImage?: string;
+        steps?: string[];
       };
       spokenPrompt?: string;
     }

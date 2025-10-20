@@ -8,7 +8,7 @@ import StreamingAvatar, {
 } from "@heygen/streaming-avatar";
 
 import { AvatarStream, type AvatarConnectionState } from "./AvatarStream";
-import { Hero } from "./Hero";
+import { Landing } from "./Landing";
 import { MicBar } from "./MicBar";
 import { OverlayManager, type Overlay } from "./OverlayManager";
 import { brainRespond, newSession, type SessionDescriptor } from "@/lib/api";
@@ -46,7 +46,6 @@ export const Kiosk = () => {
   const [threadId, setThreadId] = useState<string | undefined>();
   const [status, setStatus] = useState("Ready when you are!");
   const [processing, setProcessing] = useState(false);
-  const [outputMuted, setOutputMuted] = useState(false);
   const [greeted, setGreeted] = useState(false);
 
   const avatarRef = useRef<StreamingAvatar | null>(null);
@@ -71,9 +70,6 @@ export const Kiosk = () => {
       case "directions":
         setOverlay({ type: "directions", directions: event.directions });
         break;
-      case "checkout":
-        setOverlay({ type: "checkout", receipt: event.receipt });
-        break;
       case "add_to_cart":
         setCart(event.cart);
         setOverlay(null);
@@ -95,7 +91,6 @@ export const Kiosk = () => {
     setCart([]);
     setThreadId(undefined);
     setStatus("Ready when you are!");
-    setOutputMuted(false);
     setGreeted(false);
     setStarted(false);
   }, []);
@@ -107,7 +102,7 @@ export const Kiosk = () => {
       }
 
       setProcessing(true);
-      setStatus("Thinking…");
+      setStatus("Thinking...");
       try {
         const response = await brainRespond(utterance, cart, threadId, activeSession);
         setThreadId(response.threadId);
@@ -139,7 +134,7 @@ export const Kiosk = () => {
 
     setProcessing(true);
     setConnectionError(null);
-    setStatus("Connecting to the avatar…");
+    setStatus("Connecting to the avatar...");
 
     try {
       const newDescriptor = await newSession(avatarIdToUse);
@@ -161,23 +156,41 @@ export const Kiosk = () => {
 
       setConnectionState("connecting");
       setOverlay(null);
-      setOutputMuted(false);
 
       avatar.on(StreamingEvents.STREAM_READY, ({ detail }) => {
         setStream(detail);
         setConnectionState("connected");
-        setStatus("Connected. Say hi or press Tap to Talk!");
+        setStatus("Connected. Tap the mic when you're ready to talk.");
       });
 
       avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
         resetSession();
       });
 
+      avatar.on(StreamingEvents.AVATAR_START_TALKING, () => {
+        setStatus((prev) => (prev === "Thinking..." ? "Serving that up..." : prev));
+      });
+      avatar.on(StreamingEvents.AVATAR_STOP_TALKING, () => {
+        setStatus("Ready for your next request.");
+      });
+
       const sessionResponse: StartAvatarResponse = await avatar.createStartAvatar({
         avatarName: newDescriptor.avatarId,
         quality: AvatarQuality.High,
         language: "en",
+        useSilencePrompt: false,
+        enablePushToTalk: true,
       });
+
+      if (typeof avatar.startVoiceChat === "function") {
+        try {
+          await avatar.startVoiceChat({
+            isInputAudioMuted: true,
+          });
+        } catch (voiceChatError) {
+          console.warn("Unable to start HeyGen voice chat channel", voiceChatError);
+        }
+      }
 
       setActiveSession({
         sessionId: sessionResponse.session_id,
@@ -210,10 +223,6 @@ export const Kiosk = () => {
     }
   }, [resetSession]);
 
-  const toggleOutputMute = useCallback(() => {
-    setOutputMuted((prev) => !prev);
-  }, []);
-
   useEffect(() => {
     if (connectionState !== "connected" || !activeSession || greeted) {
       return;
@@ -244,16 +253,12 @@ export const Kiosk = () => {
   }, []);
 
   if (!started || !sessionDescriptor || !activeSession) {
-    return (
-      <div className="kiosk">
-        <Hero onStart={startSession} />
-      </div>
-    );
+    return <Landing onStart={startSession} processing={processing} status={status} />;
   }
 
   return (
     <div className="kiosk">
-      <AvatarStream stream={stream} state={connectionState} error={connectionError} muted={outputMuted} />
+      <AvatarStream stream={stream} state={connectionState} error={connectionError} />
 
       <OverlayManager
         overlay={overlay}
@@ -264,31 +269,27 @@ export const Kiosk = () => {
         onClose={() => setOverlay(null)}
       />
 
-      <div className="kiosk__status">
-        <span>{status}</span>
-      </div>
-
-      <div className="kiosk__controls">
-        <div className="session-controls">
+      <div className="kiosk__hud">
+        <div className="kiosk__top">
           <button
             type="button"
-            className="button button--secondary"
+            className="kiosk__end-button"
             onClick={endSession}
             disabled={processing || connectionState === "inactive"}
           >
-            End session
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={toggleOutputMute}
-            disabled={connectionState !== "connected"}
-          >
-            {outputMuted ? "Unmute avatar" : "Mute avatar"}
+            End Session
           </button>
         </div>
 
-        <MicBar disabled={processing || connectionState !== "connected"} onUtterance={handleUtterance} />
+        <div className="kiosk__center">
+          <MicBar disabled={processing || connectionState !== "connected"} onUtterance={handleUtterance} />
+        </div>
+
+        <div className="kiosk__bottom">
+          <div className="kiosk__status" role="status" aria-live="polite">
+            {status}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -14,7 +14,7 @@ export const Hero: FC<HeroProps> = ({ onStart }) => (
         <h1 className="hero__heading">Delight guests with an AI scoop specialist</h1>
         <p className="hero__body">
           Launch a live conversation with our interactive avatar to guide visitors through flavours,
-          recommendations, and checkout in real time.
+          personalised recommendations, and pickup directions in real time.
         </p>
         <button type="button" className="button button--primary hero__cta" onClick={onStart}>
           Start Session
