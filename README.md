@@ -1,98 +1,120 @@
 # Icecream Kiosk AI Avatar
 
-An end-to-end kiosk experience that combines:
-
-- **HeyGen Streaming Avatar SDK** for real-time avatar video, lip-sync, and kiosk-friendly audio playback.
-- **OpenAI Assistants API** for conversational intelligence, tool calling, and contextual replies.
-- **OpenAI Whisper** for reliable push-to-talk speech recognition that feeds external tools.
-- Dynamic overlays (products and pickup directions) driven by Assistant tool decisions.
+An end-to-end kiosk experience powered by LiveKit. The React frontend connects to a FastAPI backend for LiveKit access tokens, while a Python LiveKit Agent (with the Anam avatar plugin) handles STT → LLM → tool calls and streams video/audio back to guests.
 
 ## Monorepo layout
 
 ```
-backend/    # Express + TypeScript API (HeyGen token proxy, Whisper STT, OpenAI Assistants)
-frontend/   # Next.js 14 App Router kiosk UI with Streaming Avatar video and overlays
-Detailed doc for project build
+agents/       # LiveKit Agent worker (Python) + Anam avatar session
+backend_py/   # FastAPI service for LiveKit tokens & optional tool proxies
+frontend/     # Next.js 15 kiosk UI that joins LiveKit and renders overlays
 ```
 
 ## Prerequisites
 
-- Node.js 18+ and npm.
-- HeyGen API key with access to the **Streaming Avatar** feature.
-- OpenAI API key and an Assistants v2 ID configured with the kiosk tools.
+- Node.js 18+ and npm (for the frontend).
+- Python 3.12 (for the FastAPI backend and the LiveKit agent worker).
+- LiveKit Cloud project (or self-hosted) with API key/secret.
+- Provider keys for the agent pipeline (e.g., OpenAI, Deepgram, Cartesia, Anam).
+- Optional Make.com webhook URLs for product/cart/directions/checkout flows.
 
 ## Environment configuration
 
-### Backend (`backend/.env`)
+### Backend (`backend_py/.env`)
 
-Duplicate `backend/.env.example` and populate:
+Duplicate `backend_py/.env.example` and fill in the values:
 
 | Variable | Description |
 | --- | --- |
 | `PORT` | API port (default `8080`). |
-| `HEYGEN_API_KEY` | Secret from the HeyGen dashboard (Streaming Avatar enabled). |
-| `HEYGEN_BASE_URL` | Defaults to `https://api.heygen.com`. |
-| `HEYGEN_AVATAR_ID` | Optional default streaming avatar ID. |
-| `OPENAI_API_KEY` | Secret from OpenAI. |
-| `OPENAI_ASSISTANT_ID` | Assistant v2 ID which contains kiosk instructions and tools. |
-| `OPENAI_ASSISTANT_MODEL` | Assistant model (default `gpt-4o-mini`). |
-| `CORS_ALLOWED_ORIGINS` | CSV of allowed origins (e.g. `http://localhost:3000`). |
+| `ALLOWED_ORIGINS` | Comma-separated list of allowed origins (defaults to `http://localhost:3000`). |
+| `LIVEKIT_URL` | Your LiveKit server WebSocket URL (e.g., `wss://example.livekit.cloud`). |
+| `LIVEKIT_API_KEY` | LiveKit API key with permission to mint room tokens. |
+| `LIVEKIT_API_SECRET` | LiveKit API secret. |
+
+### Agent
+
+Set the following environment variables when running `agents/scoop_agent.py` (or the Docker image):
+
+- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_ROOM`
+- `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`
+- `ANAM_API_KEY`, `ANAM_AVATAR_ID`
+- Optional Make.com webhooks: `FIND_PRODUCTS_WEBHOOK_URL`, `ADD_TO_CART_WEBHOOK_URL`, `GET_DIRECTIONS_WEBHOOK_URL`, `CHECKOUT_WEBHOOK_URL`
 
 ### Frontend (`frontend/.env.local`)
 
-Create `frontend/.env.local` (or update your environment) with:
+Create `frontend/.env.local` if you need to override defaults:
 
 | Variable | Description |
 | --- | --- |
-| `NEXT_PUBLIC_HEYGEN_AVATAR_ID` | Streaming avatar ID to start sessions with. |
-| `NEXT_PUBLIC_BACKEND_URL` | Backend URL (default `http://localhost:8080`). |
-| `NEXT_PUBLIC_HEYGEN_BASE_URL` | Optional override for the HeyGen API base (default `https://api.heygen.com`). |
+| `NEXT_PUBLIC_BACKEND_URL` | Override the backend URL if you are not proxying requests (default `/`). |
 
 ## Install & run
 
-```bash
-# Backend
-cd backend
-npm install
-npm run dev
+### FastAPI backend
 
-# Frontend (new terminal)
-cd ../frontend
+```bash
+cd backend_py
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env  # update values
+uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+```
+
+Test the endpoints:
+
+```bash
+curl http://localhost:8080/health
+curl -X POST http://localhost:8080/api/livekit/token \
+  -H "content-type: application/json" \
+  -d '{"identity":"kiosk-001","name":"kiosk-001"}'
+```
+
+### LiveKit agent worker
+
+```bash
+cd agents
+python -m venv .venv
+source .venv/bin/activate
+pip install "livekit-agents[anam]==1.2.0" \
+  livekit-plugins-openai==0.3.2 \
+  livekit-plugins-deepgram==0.3.2 \
+  livekit-plugins-cartesia==0.3.2 \
+  httpx==0.27.2
+python scoop_agent.py
+```
+
+Or build/run with Docker:
+
+```bash
+cd agents
+docker build -t scoop-agent:latest .
+docker run --rm --env-file ../agent.env scoop-agent:latest
+```
+
+### Frontend
+
+```bash
+cd frontend
 npm install
 npm run dev
 ```
 
-The Next.js dev server runs at http://localhost:3000. Configure `NEXT_PUBLIC_BACKEND_URL` so the kiosk points to your Express API (for local development use `http://localhost:8080`). On the first successful connection the avatar greets the user; use the push-to-talk bar and the session controls to mute audio or end the conversation.
+The Next.js dev server runs at http://localhost:3000. The landing page contains a Start button that navigates to `/session`; the session screen fetches a LiveKit token from the FastAPI backend, joins the room, renders the Anam avatar track, and listens for overlay directives over the LiveKit data channel.
 
-## Backend API overview
+## Key flows
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `POST` | `/api/session/new` | Request a short-lived Streaming Avatar access token. |
-| `POST` | `/api/stt/transcribe` | Send audio to OpenAI Whisper and return the transcript. |
-| `POST` | `/api/brain/respond` | Run the Assistant, execute tool calls, and produce UI directives + speech. |
-| `POST` | `/webhooks/openai/tool` | Utility webhook that mirrors tool handling (reserved for future integrations). |
-| `GET` | `/health` | Basic readiness probe. |
+1. **Landing page** – Single CTA that routes visitors to `/session`.
+2. **Session view** – Connects to LiveKit, renders the agent video tile, exposes a single microphone toggle, and displays overlays from the agent (products, cart, directions, checkout).
+3. **Agent worker** – Handles STT → LLM → tool invocation, streams audio/video via the Anam plugin, and publishes overlay JSON on the data track.
+4. **Tooling** – Agent tools call Make.com webhooks (directly or via backend proxy) to drive product discovery, cart building, pickup directions, and checkout receipts.
 
-The backend configures the Assistant on startup so tool definitions stay in sync with the kiosk behaviour.
+## Testing checklist
 
-## Frontend features
-
-- React kiosk UI powered by `@heygen/streaming-avatar` for low-latency video and speech playback.
-- Push-to-talk bar that captures microphone audio, calls Whisper, and feeds transcripts into the Assistant for tool routing.
-- One-tap session controls for ending the conversation or muting avatar audio.
-- Overlay manager for product recommendations and pickup directions.
-- Avatar responses are spoken with `avatar.speak(...)`, using the Assistant's `spokenPrompt` when provided.
-
-## HTTPS & kiosk mode
-
-Browsers require HTTPS for microphone/WebRTC when not running on `localhost`. For kiosk hardware, provide HTTPS via a reverse proxy or `next dev --experimental-https`. Chrome kiosk mode can be launched with:
-
-```bash
-chrome --kiosk https://your-kiosk-url
-```
-
-## Offline environments
-
-If npm registry access is blocked (e.g., `npm ERR! code E403`), install dependencies in a network-friendly workspace, copy the resulting `node_modules` directories (or cached tarballs) into this project, and rerun `npm install --offline` inside each package.
-
+- `GET /health` returns `{ "ok": true }`.
+- `POST /api/livekit/token` returns `{ url, token }`.
+- Frontend session page successfully joins the LiveKit room and renders the Anam avatar video.
+- Mic toggle publishes the local audio track; the agent responds with speech.
+- Overlay payloads received via LiveKit data track render on screen.
+- Checkout flow displays the final amount and receipt link when the agent calls the `checkout` tool.

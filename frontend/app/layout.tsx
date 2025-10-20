@@ -6,8 +6,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Scoop Haven AI Kiosk",
-  description:
-    "AI-powered ice cream kiosk experience with HeyGen avatars, Whisper STT, and OpenAI orchestrated flows.",
+  description: "LiveKit-powered Scoop Haven kiosk with Anam avatar, realtime tools, and immersive overlays.",
 };
 
 export default function RootLayout({
