@@ -1,6 +1,0 @@
-fastapi==0.115.2
-uvicorn[standard]==0.30.6
-pydantic-settings==2.5.2
-loguru==0.7.2
-slowapi==0.1.9
-livekit-api==0.5.1
