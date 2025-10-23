@@ -1,8 +1,16 @@
 {
   "name": "icecream-kiosk-ai-avatar",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "workspaces": [
     "frontend"
-  ]
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace frontend",
+    "start": "npm run start --workspace frontend",
+    "lint": "npm run lint --workspace frontend",
+    "format": "npm run lint --workspace frontend -- --fix",
+    "agent": "python agents/avatar_anam.py start"
+  }
 }

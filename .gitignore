@@ -1,28 +1,27 @@
-node_modules
+node_modules/
 npm-debug.log*
-dist
+dist/
 
-frontend/node_modules
-frontend/.next
+frontend/node_modules/
+frontend/.next/
+frontend/.turbo/
 frontend/.env
 frontend/.env.local
 
-backend/node_modules
-backend/.env
-
 .env
-backend_py/.env
-backend_py/.venv
-backend_py/__pycache__
+.venv/
+**/__pycache__/
+*.py[cod]
 
 agents/.env
-agents/.venv
-agents/__pycache__
+agents/.venv/
+agents/__pycache__/
 
-*.pyc
 .DS_Store
-.vscode
-.idea
+.vscode/
+.idea/
+*.log
+coverage/
 
 reference repo examples/
 
