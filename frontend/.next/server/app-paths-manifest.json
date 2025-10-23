@@ -1,4 +1,13 @@
 {
+  "/_global-error/page": "app/_global-error/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/livekit/connection-details/route": "app/api/livekit/connection-details/route.js",
+  "/api/livekit/record/start/route": "app/api/livekit/record/start/route.js",
+  "/api/livekit/record/stop/route": "app/api/livekit/record/stop/route.js",
+  "/api/livekit/request-agent/route": "app/api/livekit/request-agent/route.js",
+  "/api/livekit/stop-agent/route": "app/api/livekit/stop-agent/route.js",
+  "/custom/page": "app/custom/page.js",
+  "/favicon.ico/route": "app/favicon.ico/route.js",
   "/page": "app/page.js",
-  "/session/page": "app/session/page.js"
+  "/rooms/[roomName]/page": "app/rooms/[roomName]/page.js"
 }

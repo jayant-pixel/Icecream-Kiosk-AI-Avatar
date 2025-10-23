@@ -1,1 +1,113 @@
-{"version":3,"caseSensitive":false,"basePath":"","rewrites":{"beforeFiles":[],"afterFiles":[],"fallback":[]},"redirects":[{"source":"/:path+/","destination":"/:path+","permanent":true,"internal":true,"regex":"^(?:\\/((?:[^\\/]+?)(?:\\/(?:[^\\/]+?))*))\\/$"}],"headers":[]}
+{
+  "version": 3,
+  "pages404": true,
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [],
+    "fallback": []
+  },
+  "dynamicRoutes": [
+    {
+      "page": "/rooms/[roomName]",
+      "regex": "^/rooms/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtProomName": "nxtProomName"
+      },
+      "namedRegex": "^/rooms/(?<nxtProomName>[^/]+?)(?:/)?$"
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/api/livekit/connection-details",
+      "regex": "^/api/livekit/connection\\-details(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/livekit/connection\\-details(?:/)?$"
+    },
+    {
+      "page": "/api/livekit/record/start",
+      "regex": "^/api/livekit/record/start(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/livekit/record/start(?:/)?$"
+    },
+    {
+      "page": "/api/livekit/record/stop",
+      "regex": "^/api/livekit/record/stop(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/livekit/record/stop(?:/)?$"
+    },
+    {
+      "page": "/api/livekit/request-agent",
+      "regex": "^/api/livekit/request\\-agent(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/livekit/request\\-agent(?:/)?$"
+    },
+    {
+      "page": "/api/livekit/stop-agent",
+      "regex": "^/api/livekit/stop\\-agent(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/livekit/stop\\-agent(?:/)?$"
+    },
+    {
+      "page": "/custom",
+      "regex": "^/custom(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/custom(?:/)?$"
+    },
+    {
+      "page": "/favicon.ico",
+      "regex": "^/favicon\\.ico(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/favicon\\.ico(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSuffix": ".prefetch.rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": false,
+    "dynamicRSCPrerender": false
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}
