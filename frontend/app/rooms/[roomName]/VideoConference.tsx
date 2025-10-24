@@ -31,10 +31,10 @@ export function VideoConference({
   }, [tracks]);
 
   useDataChannel(
+    "lk.transcription",
     React.useCallback(() => {
       /* ignore LiveKit transcription payloads to avoid noisy console warnings */
-    }, []),
-    { topics: ["lk.transcription"] }
+    }, [])
   );
 
   return (
@@ -60,12 +60,10 @@ export function VideoConference({
             </div>
           </div>
         )}
-        <div className="pointer-events-none absolute inset-x-0 bottom-28 flex w-full justify-center px-4 sm:inset-y-0 sm:right-10 sm:bottom-auto sm:top-1/2 sm:inset-x-auto sm:-translate-y-1/2 sm:justify-end sm:px-0 sm:transform">
-          <div className="flex w-full max-w-sm flex-col gap-4 sm:items-end">
-            <ProductShowcase />
-            <div className="pointer-events-auto">
-              <OverlayLayer />
-            </div>
+        <div className="pointer-events-none absolute inset-0 flex w-full flex-col items-center justify-center gap-6 px-4">
+          <ProductShowcase className="max-w-6xl" />
+          <div className="pointer-events-auto w-full max-w-2xl">
+            <OverlayLayer />
           </div>
         </div>
       </div>

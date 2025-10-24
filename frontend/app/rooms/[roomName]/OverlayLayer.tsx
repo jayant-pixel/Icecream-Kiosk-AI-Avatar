@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { RoomEvent } from "livekit-client";
-import { useRoomContext } from "@livekit/components-react";
+import { useRoomContext, useVoiceAssistant } from "@livekit/components-react";
+import clsx from "clsx";
 
 type Product = {
   id?: string;
   name?: string;
   description?: string;
-  priceCents?: number;
+  priceDollars?: number;
   imageUrl?: string;
   displayName?: string[] | string;
 };
@@ -23,14 +24,14 @@ type CartItem = {
   productId?: string;
   name?: string;
   qty?: number;
-  priceCents?: number;
+  priceDollars?: number;
   imageUrl?: string;
 };
 
 type CartSummary = {
-  subtotalCents?: number;
-  taxCents?: number;
-  totalCents?: number;
+  subtotalDollars?: number;
+  taxDollars?: number;
+  totalDollars?: number;
   message?: string;
 };
 
@@ -85,7 +86,7 @@ export function OverlayLayer() {
   return (
     <div className="pointer-events-auto w-full max-w-[min(90vw,900px)]">
       <div className="rounded-3xl bg-white/85 p-6 shadow-2xl backdrop-blur-md text-[color:var(--icecream-dark)]">
-        <div className="flex justify-between items-start gap-6">
+        <div className="flex items-start justify-between gap-6">
           <div className="flex-1 min-w-0">{content}</div>
           <button
             type="button"
@@ -100,9 +101,11 @@ export function OverlayLayer() {
   );
 }
 
-function formatPrice(cents?: number) {
-  if (typeof cents !== "number") return "";
-  return `$${(cents / 100).toFixed(2)}`;
+function formatPrice(dollars?: number) {
+  if (typeof dollars === "number") {
+    return `$${dollars.toFixed(2)}`;
+  }
+  return "";
 }
 
 function ProductsOverlay({ payload }: { payload: OverlayPayload }) {
@@ -139,19 +142,14 @@ function ProductsOverlay({ payload }: { payload: OverlayPayload }) {
             )}
             <div className="space-y-1">
               <h3 className="text-base font-semibold">{product.name}</h3>
-              <p className="text-sm opacity-75 line-clamp-3">
-                {product.description}
-              </p>
+              <p className="text-sm opacity-75 line-clamp-3">{product.description}</p>
               <div className="flex flex-wrap gap-2 pt-1 text-xs uppercase tracking-wide">
                 <span className="rounded-full bg-[color:var(--icecream-primary)]/10 px-2 py-1 font-semibold text-[color:var(--icecream-primary)]">
-                  {formatPrice(product.priceCents)}
+                  {formatPrice(product.priceDollars)}
                 </span>
                 {Array.isArray(product.displayName) &&
                   product.displayName.map((label) => (
-                    <span
-                      key={`${product.id}-${label}`}
-                      className="rounded-full bg-black/5 px-2 py-1 text-black/60"
-                    >
+                    <span key={`${product.id}-${label}`} className="rounded-full bg-black/5 px-2 py-1 text-black/60">
                       {label}
                     </span>
                   ))}
@@ -172,9 +170,7 @@ function DirectionsOverlay({ payload }: { payload: OverlayPayload }) {
       <div className="space-y-2">
         <h3 className="text-lg font-semibold">Pickup guidance</h3>
         <p className="text-sm opacity-80">
-          {fallback
-            ? `We’re fetching directions for ${fallback}…`
-            : "Directions will appear here shortly."}
+          {fallback ? `We're fetching directions for ${fallback}â€¦` : "Directions will appear here shortly."}
         </p>
       </div>
     );
@@ -182,9 +178,7 @@ function DirectionsOverlay({ payload }: { payload: OverlayPayload }) {
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold text-[color:var(--icecream-primary)]">
-        Pickup Guidance
-      </h3>
+      <h3 className="text-lg font-semibold text-[color:var(--icecream-primary)]">Pickup Guidance</h3>
       <div className="space-y-3">
         {directions.map((entry, index) => (
           <article
@@ -200,9 +194,7 @@ function DirectionsOverlay({ payload }: { payload: OverlayPayload }) {
               />
             ) : null}
             <div className="space-y-1">
-              <h4 className="text-base font-semibold">
-                {entry.displayName ?? "Display"}
-              </h4>
+              <h4 className="text-base font-semibold">{entry.displayName ?? "Display"}</h4>
               <p className="text-sm opacity-75">
                 {entry.hint ?? "Look for the Scoop signage nearby."}
               </p>
@@ -220,9 +212,7 @@ function CartOverlay({ payload }: { payload: OverlayPayload }) {
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold text-[color:var(--icecream-primary)]">
-        Cart snapshot
-      </h3>
+      <h3 className="text-lg font-semibold text-[color:var(--icecream-primary)]">Cart snapshot</h3>
       {items.length === 0 ? (
         <p className="text-sm opacity-70">Your cart is currently empty.</p>
       ) : (
@@ -241,14 +231,12 @@ function CartOverlay({ payload }: { payload: OverlayPayload }) {
                 />
               ) : (
                 <div className="flex h-20 w-20 items-center justify-center rounded-lg bg-[color:var(--icecream-primary)]/10 text-[color:var(--icecream-primary)]">
-                  {item.qty}×
+                  {item.qty}Ã—
                 </div>
               )}
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold">{item.name}</p>
-                <p className="text-xs opacity-70">
-                  Qty {item.qty} · {formatPrice(item.priceCents)}
-                </p>
+                <p className="text-xs opacity-70">Qty {item.qty} Ã— {formatPrice(item.priceDollars)}</p>
               </div>
             </div>
           ))}
@@ -257,15 +245,15 @@ function CartOverlay({ payload }: { payload: OverlayPayload }) {
       <div className="rounded-2xl bg-black/5 p-4 text-sm">
         <div className="flex justify-between">
           <span>Subtotal</span>
-          <span>{formatPrice(summary.subtotalCents)}</span>
+          <span>{formatPrice(summary.subtotalDollars)}</span>
         </div>
         <div className="flex justify-between">
           <span>Tax</span>
-          <span>{formatPrice(summary.taxCents)}</span>
+          <span>{formatPrice(summary.taxDollars)}</span>
         </div>
         <div className="mt-2 flex justify-between text-base font-semibold">
           <span>Total</span>
-          <span>{formatPrice(summary.totalCents)}</span>
+          <span>{formatPrice(summary.totalDollars)}</span>
         </div>
         {summary.message && (
           <p className="mt-2 text-xs uppercase tracking-wide text-[color:var(--icecream-primary)]">
@@ -276,4 +264,3 @@ function CartOverlay({ payload }: { payload: OverlayPayload }) {
     </div>
   );
 }
-

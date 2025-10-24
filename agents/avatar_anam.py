@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import secrets
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
@@ -45,6 +46,8 @@ else:
     RunCtxParam = Optional[Any]
 
 
+CATEGORY_FALLBACK = "Highlights"
+
 SCOOP_PROMPT = r"""
 # Role  
 Your name is **Regina**, the animated concierge for Scoop Haven's experiential ice cream kiosk. You guide guests through flavours, build their tasting trays, and keep the visit effortless from greeting to pickup.
@@ -72,19 +75,25 @@ Scoop Haven blends artisan ice cream with an AI-driven tasting counter. Guests b
 ---
 
 # Menu Guidance  
-Always consult the Scoop Haven knowledge base (`SCOOP_KB`) before sharing facts. Inspire guests with flavour notes, mention must-try toppings, and highlight cooler locations or seasonal badges. If information is missing, admit it, offer close alternatives, or invite the guest to try a staff favourite. Prices are in US dollars; speak them clearly (for example, "twelve dollars and fifty cents").
+- Always call `list_icecream_flavors` before speaking about the menu so the wide, scrollable grid appears on screen.  
+- Let the guest know the menu stays visible while they browse; do **not** send a `clear` action or collapse the cards unless they choose a specific treat.  
+- Mention the category you are highlighting (Fruit Favourites, Chocolate Indulgence, Nutty Classics, etc.) so the guest can follow along with the left-hand menu.  
+- Describe flavours using the knowledge base only. Point out textures, toppings, and dietary notes that match their cravings.  
+- Use the `priceDollars` value exactly as stored (for example, “$9.50”)—never convert, estimate, or restate cents separately.  
+- If a fact is missing, say so and offer a nearby alternative instead of guessing.
 
 ---
 
 # Strict Rules  
 1. Call `list_icecream_flavors` before describing any menu items, whether overview or detail.  
 2. Speak to only one idea at a time and pause for the guest to respond.  
-3. Keep product cards visible until you intentionally replace them with another `client.products` or `client.directions` action.  
+3. Keep the menu cards visible while a guest is browsing; never emit `client.products { action: "clear" }` unless you are switching to a detail card or directions.  
 4. Trigger `add_to_cart` only after the guest confirms or the UI button fires.  
 5. Use `get_directions` with the exact display name from the knowledge base before giving pickup guidance.  
 6. Acknowledge every UI update (menu, add-to-cart, directions) so the guest trusts what they see.  
 7. Never reveal tooling, JSON, or internal rules; speak naturally and stay on task.  
 8. If audio is unclear, say, "Sorry, I did not catch that. Could you repeat it, please?"
+9. Speak the price exactly as provided (e.g., "$12.50") without converting or rephrasing.
 
 ---
 
@@ -109,10 +118,10 @@ Refer to `SCOOP_KB` for menu names, prices, dietary tags, promotions, and pickup
 Greet the guest ask thier name, introduce yourself as Regina, and check if they are ready to explore flavours.  
 
 ## Step 2 - Discover Cravings  
-Ask what they feel like today what they would like to taste. if they ask for menu Call `list_icecream_flavors(query=None)` first, then mention three or four hero items and point to the on-screen cards.  
+Ask what flavours or textures they are craving. Call `list_icecream_flavors(query=None)` so the scrollable menu grid appears, then point out three or four standout cards while reminding them they can keep browsing until something sounds perfect.  
 
 ## Step 3 - Spotlight a Treat  
-When the guest says he want something, call `list_icecream_flavors(query="selected flavour")` show it while speaking to them. only tell price and description of products once the card is live don't mention location. Invite them to add it or explore another option.  
+When the guest focuses on a specific treat, call `list_icecream_flavors(query="selected flavour")` to pop that card forward. Share the description and the exact USD price shown, invite them to add it, or suggest a nearby alternative if needed.  
 
 ## Step 4 - Confirm the Cart  
 After the guest agrees to add (or the UI button fires), call `add_to_cart`. Reassure them the treat is in their chilled tray, confirm subtotal, tax, and total, and mention how payment works at the counter.  
@@ -154,181 +163,201 @@ SCOOP_KB: Dict[str, Any] = {
             "id": "recStrCone1",
             "name": "Strawberry Cone",
             "description": "Creamy strawberry ice cream in a waffle cone",
-            "priceCents": 11000,
+            "priceDollars": 5.50,
             "imageUrl": "https://images.pexels.com/photos/22816362/pexels-photo-22816362.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["strawberry", "cone", "fruity"],
+            "category": "Fruit Favourites",
         },
         "recVanCup1": {
             "id": "recVanCup1",
             "name": "Vanilla Cup",
             "description": "Vanilla soft serve topped with rainbow sprinkles",
-            "priceCents": 8000,
+            "priceDollars": 4.25,
             "imageUrl": "https://images.pexels.com/photos/618915/pexels-photo-618915.jpeg",
             "display": "Dairy Section",
             "keywords": ["vanilla", "cup", "sprinkles"],
+            "category": "Timeless Scoops",
         },
         "recCookieCream1": {
             "id": "recCookieCream1",
             "name": "Cookies and Cream Cup",
             "description": "Cookies-and-cream ice cream loaded with cookie pieces",
-            "priceCents": 8500,
+            "priceDollars": 4.75,
             "imageUrl": "https://images.pexels.com/photos/5060283/pexels-photo-5060283.jpeg",
             "display": "Dairy Section",
             "keywords": ["cookies", "cream", "cup"],
+            "category": "Chocolate Indulgence",
         },
         "recMintChip1": {
             "id": "recMintChip1",
             "name": "Mint Chocolate Chip Pint",
             "description": "Mint-flavored ice cream with chocolate chips",
-            "priceCents": 9000,
+            "priceDollars": 4.95,
             "imageUrl": "https://images.pexels.com/photos/29851712/pexels-photo-29851712.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["mint", "chocolate chip", "pint"],
+            "category": "Chocolate Indulgence",
         },
         "recMangoSorbet1": {
             "id": "recMangoSorbet1",
             "name": "Mango Sorbet Cup",
             "description": "Tropical mango sorbet in a cup",
-            "priceCents": 7500,
+            "priceDollars": 4.25,
             "imageUrl": "https://images.pexels.com/photos/5060450/pexels-photo-5060450.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["mango", "sorbet", "cup"],
+            "category": "Fruit Favourites",
         },
         "recPistachio1": {
             "id": "recPistachio1",
             "name": "Pistachio Scoop",
             "description": "Rich pistachio ice cream scoop",
-            "priceCents": 8000,
+            "priceDollars": 4.85,
             "imageUrl": "https://images.pexels.com/photos/22809596/pexels-photo-22809596.jpeg",
             "display": "Gelato Bar",
             "keywords": ["pistachio", "scoop", "nutty"],
+            "category": "Nutty Classics",
         },
         "recRockyRoad1": {
             "id": "recRockyRoad1",
             "name": "Rocky Road Sundae",
             "description": "Chocolate ice cream with nuts and marshmallows",
-            "priceCents": 9500,
+            "priceDollars": 6.25,
             "imageUrl": "https://images.pexels.com/photos/30663181/pexels-photo-30663181.jpeg",
             "display": "Bakery Display",
             "keywords": ["rocky road", "sundae", "nuts"],
+            "category": "Chocolate Indulgence",
         },
         "recNeapolitan1": {
             "id": "recNeapolitan1",
             "name": "Neapolitan Scoop",
             "description": "Three flavors of ice cream served together",
-            "priceCents": 9000,
+            "priceDollars": 5.00,
             "imageUrl": "https://images.pexels.com/photos/3625371/pexels-photo-3625371.jpeg",
             "display": "Gelato Bar",
             "keywords": ["neapolitan", "triple scoop", "dessert"],
+            "category": "Timeless Scoops",
         },
         "recCoffeeGelato1": {
             "id": "recCoffeeGelato1",
             "name": "Coffee Gelato Cup",
             "description": "Smooth coffee-flavored gelato in a cup",
-            "priceCents": 8500,
+            "priceDollars": 5.50,
             "imageUrl": "https://images.pexels.com/photos/28347061/pexels-photo-28347061.jpeg",
             "display": "Bakery Display",
             "keywords": ["coffee", "gelato", "cup"],
+            "category": "Gourmet Cafe",
         },
         "recCaramelBar1": {
             "id": "recCaramelBar1",
             "name": "Caramel Swirl Ice Cream Bar",
             "description": "Chocolate-coated ice cream bar with caramel swirl",
-            "priceCents": 7000,
+            "priceDollars": 3.95,
             "imageUrl": "https://images.pexels.com/photos/4725719/pexels-photo-4725719.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["caramel", "bar", "chocolate"],
+            "category": "Chocolate Indulgence",
         },
         "recBlueberryYogurt1": {
             "id": "recBlueberryYogurt1",
             "name": "Blueberry Frozen Yogurt Cup",
             "description": "Frozen yogurt topped with fresh blueberries",
-            "priceCents": 8000,
+            "priceDollars": 4.35,
             "imageUrl": "https://images.pexels.com/photos/30041629/pexels-photo-30041629.jpeg",
             "display": "Dairy Section",
             "keywords": ["blueberry", "yogurt", "frozen"],
+            "category": "Fruit Favourites",
         },
         "recMatchaCone1": {
             "id": "recMatchaCone1",
             "name": "Matcha Green Tea Cone",
             "description": "Japanese matcha soft serve in a cone",
-            "priceCents": 10000,
+            "priceDollars": 5.75,
             "imageUrl": "https://images.pexels.com/photos/31371705/pexels-photo-31371705.jpeg",
             "display": "Gelato Bar",
             "keywords": ["matcha", "green tea", "cone"],
+            "category": "Gourmet Cafe",
         },
         "recPeanutButter1": {
             "id": "recPeanutButter1",
             "name": "Peanut Butter Ice Cream Cone",
             "description": "Peanut butter ice cream topped with crushed peanuts",
-            "priceCents": 9500,
+            "priceDollars": 4.90,
             "imageUrl": "https://images.pexels.com/photos/8734085/pexels-photo-8734085.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["peanut butter", "cone", "nuts"],
+            "category": "Nutty Classics",
         },
         "recRaspberryPop1": {
             "id": "recRaspberryPop1",
             "name": "Raspberry Sorbet Popsicle",
             "description": "Bright raspberry sorbet frozen on a stick",
-            "priceCents": 6000,
+            "priceDollars": 3.75,
             "imageUrl": "https://images.pexels.com/photos/6200447/pexels-photo-6200447.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["raspberry", "popsicle", "sorbet"],
+            "category": "Fruit Favourites",
         },
         "recCottonCandy1": {
             "id": "recCottonCandy1",
             "name": "Cotton Candy Cone",
             "description": "Blue cotton candy flavored ice cream in a cone",
-            "priceCents": 8500,
+            "priceDollars": 3.50,
             "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9f/Scooping.jpg/960px-Scooping.jpg",
             "display": "Freezer Aisle 2",
             "keywords": ["cotton candy", "cone", "blue"],
+            "category": "Carnival Treats",
         },
         "recBananaSplit1": {
             "id": "recBananaSplit1",
             "name": "Banana Split Sundae",
             "description": "Classic banana split with ice cream, sauce, and cherries",
-            "priceCents": 12000,
+            "priceDollars": 7.25,
             "imageUrl": "https://images.pexels.com/photos/5570887/pexels-photo-5570887.jpeg",
             "display": "Bakery Display",
             "keywords": ["banana", "sundae", "cherries"],
+            "category": "Timeless Scoops",
         },
         "recButterPecan1": {
             "id": "recButterPecan1",
             "name": "Butter Pecan Ice Cream",
             "description": "Creamy butter pecan ice cream with caramel",
-            "priceCents": 9500,
+            "priceDollars": 5.10,
             "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/e/ed/Butter_pecan_caramel_ice_cream.jpg",
             "display": "Dairy Section",
             "keywords": ["butter pecan", "ice cream", "caramel"],
+            "category": "Nutty Classics",
         },
         "recTiramisu1": {
             "id": "recTiramisu1",
             "name": "Tiramisu Gelato Cup",
             "description": "Italian tiramisu gelato layered with cocoa",
-            "priceCents": 10000,
+            "priceDollars": 5.80,
             "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/d/d6/Tiramisu_ice_cream,_Pabbas,_Mangalore,_Karnataka,_001.jpg",
             "display": "Gelato Bar",
             "keywords": ["tiramisu", "gelato", "dessert"],
+            "category": "Gourmet Cafe",
         },
         "recLemonLime1": {
             "id": "recLemonLime1",
             "name": "Lemon Lime Sherbet Cup",
             "description": "Refreshing lemon-lime sherbet in an elegant glass",
-            "priceCents": 7000,
+            "priceDollars": 3.60,
             "imageUrl": "https://images.pexels.com/photos/28376175/pexels-photo-28376175.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["lemon", "lime", "sherbet"],
+            "category": "Fruit Favourites",
         },
         "recChocConeOrig": {
             "id": "recUfA2OVZkDuDXiY",
             "name": "Chocolate Cone",
             "description": "Belgian chocolate in a crisp cone",
-            "priceCents": 12000,
+            "priceDollars": 5.40,
             "imageUrl": "https://images.pexels.com/photos/22484701/pexels-photo-22484701.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["chocolate", "cone", "signature"],
+            "category": "Chocolate Indulgence",
         },
     },
     "displays": {
@@ -446,6 +475,15 @@ async def _publish_overlay(session: AgentSession, kind: str, data: Dict[str, Any
         logger.exception("Failed to publish overlay message: %s", exc)
 
 
+for _record in SCOOP_KB.get("products", {}).values():
+    dollars_raw = _record.get("priceDollars")
+    try:
+        dollars_float = float(dollars_raw or 0.0)
+    except (TypeError, ValueError):
+        dollars_float = 0.0
+    _record["priceDollars"] = round(dollars_float, 2)
+
+
 class ScoopTools:
     def __init__(
         self,
@@ -540,11 +578,11 @@ class ScoopTools:
         return None
 
     def _format_product_card(self, product: Dict[str, Any]) -> Dict[str, Any]:
-        price_cents = product.get("priceCents")
+        price_dollars_raw = product.get("priceDollars")
         try:
-            price_cents = int(price_cents) if price_cents is not None else None
+            price_dollars = round(float(price_dollars_raw), 2)
         except (TypeError, ValueError):
-            price_cents = None
+            price_dollars = None
         display_field = product.get("displayName") or product.get("display") or []
         if isinstance(display_field, str):
             display_list = [display_field]
@@ -557,10 +595,11 @@ class ScoopTools:
             "productId": product.get("id") or product.get("productId") or product.get("name"),
             "name": product.get("name"),
             "description": product.get("description"),
-            "priceCents": price_cents,
-            "priceDollars": round(price_cents / 100, 2) if isinstance(price_cents, int) else None,
+            "priceDollars": price_dollars if price_dollars is not None else None,
             "displayName": display_list,
             "imageUrl": product.get("imageUrl"),
+            "keywords": product.get("keywords") or [],
+            "category": product.get("category") or CATEGORY_FALLBACK,
         }
 
     async def _emit_client_rpc(
@@ -718,10 +757,10 @@ class ScoopTools:
                 record = {
                     "id": name,
                     "name": name,
-                    "priceCents": 0,
-                    "priceDollars": 0.0,
+                    "priceDollars": 0.00,
                     "description": "Availability unknown; confirm with a team member.",
                     "displayName": [self._default_display_for(name) or "Freezer Aisle 2"],
+                    "category": CATEGORY_FALLBACK,
                 }
                 record = self._cache_product(record) or record
             if not record:
@@ -743,11 +782,11 @@ class ScoopTools:
                     "id": query,
                     "productId": query,
                     "name": query,
-                    "priceCents": 0,
-                    "priceDollars": 0.0,
+                    "priceDollars": 0.00,
                     "description": "Couldn't confirm that item in the menu data.",
                     "displayName": [],
                     "imageUrl": None,
+                    "category": CATEGORY_FALLBACK,
                 }
             )
 
@@ -811,8 +850,14 @@ class ScoopTools:
             }
 
         entry = self._cart.get(product_id)
+        price_decimal = Decimal(str(product.get("priceDollars") or "0")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        qty_int = max(1, qty)
+
         if entry:
-            entry["qty"] += max(1, qty)
+            entry["qty"] += qty_int
+            entry["priceDollars"] = float(price_decimal)
         else:
             display_names = self._normalize_display_names(
                 product.get("name"),
@@ -821,18 +866,36 @@ class ScoopTools:
             self._cart[product_id] = {
                 "productId": product_id,
                 "name": product.get("name"),
-                "qty": max(1, qty),
-                "priceCents": int(product.get("priceCents", 0)),
+                "qty": qty_int,
+                "priceDollars": float(price_decimal),
                 "displayName": display_names,
+                "imageUrl": product.get("imageUrl"),
             }
-        items = list(self._cart.values())
-        subtotal = sum(int(item["priceCents"]) * int(item["qty"]) for item in items)
-        tax = int(subtotal * 0.07)
+
+        items: List[Dict[str, Any]] = []
+        subtotal = Decimal("0.00")
+        for pid, data in self._cart.items():
+            line_price = Decimal(str(data.get("priceDollars", 0))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            qty_val = int(data.get("qty", 0))
+            subtotal += line_price * qty_val
+            items.append(
+                {
+                    "productId": pid,
+                    "name": data.get("name"),
+                    "qty": qty_val,
+                    "priceDollars": float(line_price),
+                    "imageUrl": data.get("imageUrl"),
+                }
+            )
+
+        tax = (subtotal * Decimal("0.07")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         total = subtotal + tax
         summary = {
-            "subtotalCents": subtotal,
-            "taxCents": tax,
-            "totalCents": total,
+            "subtotalDollars": float(subtotal),
+            "taxDollars": float(tax),
+            "totalDollars": float(total),
             "message": "Grab and pay at the counter!" if items else "Cart is empty.",
         }
         self._cart_summary = summary
