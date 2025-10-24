@@ -25,3 +25,6 @@ coverage/
 
 reference repo examples/
 
+# docs pulled from LiveKit site
+livekitcloudguide.md
+.lkpath

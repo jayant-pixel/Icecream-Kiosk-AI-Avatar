@@ -83,7 +83,7 @@ export function OverlayLayer() {
   if (!content) return null;
 
   return (
-    <div className="pointer-events-auto max-w-[min(90vw,900px)]">
+    <div className="pointer-events-auto w-full max-w-[min(90vw,900px)]">
       <div className="rounded-3xl bg-white/85 p-6 shadow-2xl backdrop-blur-md text-[color:var(--icecream-dark)]">
         <div className="flex justify-between items-start gap-6">
           <div className="flex-1 min-w-0">{content}</div>
@@ -130,10 +130,10 @@ function ProductsOverlay({ payload }: { payload: OverlayPayload }) {
               <img
                 src={product.imageUrl}
                 alt={product.name ?? "Product image"}
-                className="h-24 w-24 rounded-xl object-cover"
+                className="h-28 w-28 rounded-xl object-cover"
               />
             ) : (
-              <div className="flex h-24 w-24 items-center justify-center rounded-xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
+              <div className="flex h-28 w-28 items-center justify-center rounded-xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
                 Scoop
               </div>
             )}
@@ -196,7 +196,7 @@ function DirectionsOverlay({ payload }: { payload: OverlayPayload }) {
               <img
                 src={entry.mapImage}
                 alt={entry.displayName ?? "Map"}
-                className="h-32 w-full rounded-xl object-cover sm:w-40"
+                className="h-40 w-full rounded-xl object-cover sm:w-52"
               />
             ) : null}
             <div className="space-y-1">
@@ -237,10 +237,10 @@ function CartOverlay({ payload }: { payload: OverlayPayload }) {
                 <img
                   src={item.imageUrl}
                   alt={item.name ?? "Product"}
-                  className="h-16 w-16 rounded-lg object-cover"
+                  className="h-20 w-20 rounded-lg object-cover"
                 />
               ) : (
-                <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-[color:var(--icecream-primary)]/10 text-[color:var(--icecream-primary)]">
+                <div className="flex h-20 w-20 items-center justify-center rounded-lg bg-[color:var(--icecream-primary)]/10 text-[color:var(--icecream-primary)]">
                   {item.qty}×
                 </div>
               )}

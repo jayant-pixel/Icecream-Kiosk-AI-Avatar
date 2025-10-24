@@ -199,6 +199,50 @@ Optional: Docker for containerizing the worker.
 
 ---
 
+## Deploying the worker to LiveKit Cloud
+
+The repo ships with `agents/Dockerfile` and `agents/livekit.toml` configured for agent **CA_WBqzxRkUtMFh**. Publish updates with the LiveKit CLI:
+
+1. Authenticate once
+   ```powershell
+   lk cloud auth
+   lk project set-default "avatars"
+   ```
+2. Deploy new code
+   ```powershell
+   cd agents
+   lk agent deploy
+   ```
+3. Rotate secrets when values change
+   ```powershell
+   lk agent update-secrets --id CA_WBqzxRkUtMFh --secrets-file secrets.env
+   ```
+4. Monitor status/logs
+   ```powershell
+   lk agent status --id CA_WBqzxRkUtMFh
+   lk agent logs   --id CA_WBqzxRkUtMFh
+   ```
+
+`secrets.env` should mirror `agents/.env` but must remain untracked.
+
+---
+
+## Deploying the frontend to Vercel
+
+1. Configure environment variables in Vercel:
+   - `LIVEKIT_URL`
+   - `LIVEKIT_API_KEY`
+   - `LIVEKIT_API_SECRET`
+   - `NEXT_PUBLIC_AGENT_NAME=scoop-avatar`
+   - `NEXT_PUBLIC_CONN_DETAILS_ENDPOINT=/api/livekit/connection-details`
+   - `NEXT_PUBLIC_SHOW_SETTINGS_MENU=false`
+   - `NEXT_PUBLIC_LK_RECORD_ENDPOINT=/api/livekit/record`
+   - `NEXT_PUBLIC_VOICE_AGENT_IMAGE=/images/voice-agent-image.jpg`
+2. Build command: `npm install` then `npm run build` (Vercel defaults).
+3. After deploy, smoke test the hosted app: start a session, ensure the Scoop avatar joins, add an item, and request pickup directions.
+
+---
+
 ## Common issues
 
 | Symptom | Explanation / Fix |
@@ -236,4 +280,3 @@ Optional: Docker for containerizing the worker.
 - [Anam Avatars](https://github.com/anam-ai/)
 
 Happy scooping!
-

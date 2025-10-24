@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRoomContext, useVoiceAssistant } from "@livekit/components-react";
+import clsx from "clsx";
 
 type ProductCard = {
   id?: string;
@@ -51,7 +52,11 @@ const normalizeDisplayNames = (displayName?: string[] | string) => {
 const MENU_EXPIRES_MS = 7000;
 const TOAST_DURATION_MS = 3200;
 
-export function ProductShowcase() {
+type ProductShowcaseProps = {
+  className?: string;
+};
+
+export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
   const room = useRoomContext();
   const { agent } = useVoiceAssistant();
 
@@ -62,6 +67,7 @@ export function ProductShowcase() {
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [directions, setDirections] = useState<DirectionsPayload | null>(null);
+  const [pendingProductId, setPendingProductId] = useState<string | null>(null);
   const [menuTimestamp, setMenuTimestamp] = useState<number | null>(null);
 
   useEffect(() => {
@@ -80,6 +86,7 @@ export function ProductShowcase() {
             setQuery(payload.query ?? null);
             setDetail(null);
             setSummary(null);
+            setPendingProductId(null);
             setMenuTimestamp(Date.now());
             break;
           }
@@ -90,6 +97,7 @@ export function ProductShowcase() {
             setCards(payload.products ?? []);
             setQuery(payload.query ?? null);
             setSummary(null);
+            setPendingProductId(null);
             setMenuTimestamp(null);
             break;
           }
@@ -104,6 +112,7 @@ export function ProductShowcase() {
                 qty: Math.max(1, payload.qty ?? 1),
                 expiresAt: Date.now() + TOAST_DURATION_MS,
               });
+              setPendingProductId(null);
             }
             setMenuTimestamp(null);
             break;
@@ -114,6 +123,7 @@ export function ProductShowcase() {
             setQuery(null);
             setDetail(null);
             setSummary(null);
+            setPendingProductId(null);
             setMenuTimestamp(null);
             break;
           }
@@ -182,6 +192,9 @@ export function ProductShowcase() {
       setMode(null);
       setCards([]);
       setQuery(null);
+      setDetail(null);
+      setSummary(null);
+      setMenuTimestamp(null);
     }, MENU_EXPIRES_MS);
     return () => window.clearTimeout(timer);
   }, [mode, menuTimestamp]);
@@ -198,13 +211,23 @@ export function ProductShowcase() {
       console.warn("Missing product identifier for add-to-cart RPC");
       return;
     }
+    const controllerIdentity =
+      agent.attributes?.["agentControllerIdentity"] ?? agent.attributes?.["agentcontrolleridentity"];
+    const destinationIdentity = controllerIdentity ?? agent.identity;
+    if (!destinationIdentity) {
+      console.warn("No destination identity available for add-to-cart RPC");
+      return;
+    }
+    const productKey = String(productId);
+    setPendingProductId(productKey);
     try {
       await room.localParticipant.performRpc({
-        destinationIdentity: agent.identity,
+        destinationIdentity,
         method: "agent.addToCart",
         payload: JSON.stringify({ productId, qty: 1 }),
       });
     } catch (error) {
+      setPendingProductId(null);
       console.error("Failed to invoke add-to-cart RPC", error);
     }
   };
@@ -222,143 +245,177 @@ export function ProductShowcase() {
   }, [mode, cards]);
 
   const primaryCard = detail ?? cards[0] ?? null;
+  const primaryCardKey = primaryCard
+    ? String(primaryCard.productId ?? primaryCard.id ?? primaryCard.name ?? "")
+    : null;
+  const isPendingPrimary = primaryCardKey ? pendingProductId === primaryCardKey : false;
+  const primaryLabels = primaryCard ? normalizeDisplayNames(primaryCard.displayName) : [];
 
-  return (
-    <>
-      {visible ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-[18rem] flex justify-center px-4">
-          <div className="pointer-events-auto max-w-[min(90vw,900px)]">
-            <div className="rounded-3xl bg-white/90 p-6 shadow-2xl backdrop-blur-md text-[color:var(--icecream-dark)]">
-              {mode === "menu" ? (
-                <>
-                  <div className="mb-4 space-y-2">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-                      Scoop&apos;s Signature Treats
-                    </p>
-                    <p className="text-sm text-black/60">
-                      {query ? `Here are options for “${query}”.` : "Tap a card to ask Scoop about it."}
-                    </p>
-                  </div>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    {menuCards.map((card) => (
-                      <article
-                        key={card.id ?? card.productId ?? card.name}
-                        className="flex flex-col items-center gap-3 rounded-2xl bg-white/85 p-4 shadow-md transition-transform duration-200 hover:-translate-y-1"
-                      >
-                        {card.imageUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={card.imageUrl}
-                            alt={card.name ?? "Menu item"}
-                            className="h-40 w-full rounded-xl object-cover"
-                          />
-                        ) : null}
-                        <h4 className="text-base font-semibold text-[color:var(--icecream-dark)] text-center">
-                          {card.name ?? "Treat"}
-                        </h4>
-                      </article>
-                    ))}
-                  </div>
-                </>
-              ) : null}
+  const resolveSummaryValue = (key: "subtotalCents" | "taxCents" | "totalCents") => {
+    const value = summary?.[key];
+    return typeof value === "number" ? formatPrice(value) : "—";
+  };
 
-              {mode === "detail" && primaryCard ? (
-                <div className="flex flex-col gap-4">
-                  <div className="flex flex-col gap-3 rounded-2xl bg-white/90 p-4 shadow-md sm:flex-row">
-                    {primaryCard.imageUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={primaryCard.imageUrl}
-                        alt={primaryCard.name ?? "Menu item"}
-                        className="h-44 w-full max-w-[230px] rounded-xl object-cover"
-                      />
-                    ) : null}
-                    <div className="flex-1 space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <h3 className="text-xl font-semibold text-[color:var(--icecream-dark)]">
-                          {primaryCard.name ?? "Treat"}
-                        </h3>
-                        <span className="text-lg font-semibold text-[color:var(--icecream-primary)]">
-                          {formatPrice(primaryCard.priceCents, primaryCard.priceDollars)}
-                        </span>
-                      </div>
-                      {primaryCard.description ? (
-                        <p className="text-sm leading-relaxed text-black/70">{primaryCard.description}</p>
-                      ) : null}
-                      <div className="flex flex-wrap gap-2 text-xs text-black/60">
-                        {normalizeDisplayNames(primaryCard.displayName).map((label) => (
-                          <span key={`${primaryCard.id}-${label}`} className="rounded-full bg-black/5 px-2 py-1">
-                            {label}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="pt-2">
-                        <button
-                          type="button"
-                          disabled={!agent}
-                          onClick={() => handleAddToCartClick(primaryCard)}
-                          className="inline-flex items-center gap-2 rounded-full bg-[color:var(--icecream-primary)] px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Add to cart
-                        </button>
-                      </div>
+  const summaryMessage = typeof summary?.["message"] === "string" ? (summary?.["message"] as string) : null;
+
+  const card = visible ? (
+    <div className={clsx("pointer-events-auto w-full max-w-sm", className)}>
+      <div className="rounded-[28px] border border-white/40 bg-white/95 p-6 shadow-2xl backdrop-blur-xl text-[color:var(--icecream-dark)]">
+        {mode === "menu" ? (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
+                Scoop&apos;s Signature Treats
+              </p>
+              <p className="text-sm text-black/60">
+                {query
+                  ? `Here are options for "${query}".`
+                  : "Ask Scoop to highlight a flavour for more details."}
+              </p>
+            </div>
+            <div className="flex flex-col gap-4">
+              {menuCards.map((item) => (
+                <article
+                  key={item.id ?? item.productId ?? item.name}
+                  className="flex items-center gap-3 rounded-2xl bg-white/85 p-3 shadow-sm"
+                >
+                  {item.imageUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={item.imageUrl}
+                      alt={item.name ?? "Menu item"}
+                      className="h-24 w-24 rounded-2xl object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-24 w-24 items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                      Scoop
                     </div>
-                  </div>
+                  )}
+                  <h4 className="text-base font-semibold text-[color:var(--icecream-dark)]">
+                    {item.name ?? "Treat"}
+                  </h4>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {mode === "detail" && primaryCard ? (
+          <div className="space-y-4">
+            {primaryCard.imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={primaryCard.imageUrl}
+                alt={primaryCard.name ?? "Menu item"}
+                className="h-56 w-full rounded-2xl object-cover"
+              />
+            ) : null}
+            <div className="space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
+                    Scoop recommends
+                  </p>
+                  <h3 className="text-xl font-semibold text-[color:var(--icecream-dark)]">
+                    {primaryCard.name ?? "Treat"}
+                  </h3>
+                </div>
+                <span className="text-lg font-semibold text-[color:var(--icecream-primary)]">
+                  {formatPrice(primaryCard.priceCents, primaryCard.priceDollars)}
+                </span>
+              </div>
+              {primaryCard.description ? (
+                <p className="text-sm leading-relaxed text-black/70">{primaryCard.description}</p>
+              ) : null}
+              {primaryLabels.length > 0 ? (
+                <div className="flex flex-wrap gap-2 text-xs text-black/60">
+                  {primaryLabels.map((label) => {
+                    const key = `${primaryCard.id ?? primaryCard.productId ?? primaryCard.name ?? "treat"}-${label}`;
+                    return (
+                      <span key={key} className="rounded-full bg-black/5 px-2 py-1">
+                        {label}
+                      </span>
+                    );
+                  })}
                 </div>
               ) : null}
-
-              {mode === "added" && primaryCard ? (
-                <div className="space-y-4">
-                  <div className="flex flex-col gap-3 rounded-2xl bg-white/90 p-4 shadow-md sm:flex-row">
-                    {primaryCard.imageUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={primaryCard.imageUrl}
-                        alt={primaryCard.name ?? "Menu item"}
-                        className="h-36 w-full max-w-[210px] rounded-xl object-cover"
-                      />
-                    ) : null}
-                    <div className="flex-1 space-y-1">
-                      <h3 className="text-lg font-semibold text-[color:var(--icecream-dark)]">
-                        {primaryCard.name ?? "Treat"}
-                      </h3>
-                      <p className="text-sm text-black/70">Added to your tray. Scoop will keep it chilled.</p>
-                      <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">
-                        {formatPrice(primaryCard.priceCents, primaryCard.priceDollars)}
-                      </p>
-                    </div>
-                  </div>
-                  {summary ? (
-                    <div className="rounded-2xl bg-black/5 p-4 text-sm text-black/70">
-                      <div className="flex justify-between">
-                        <span>Subtotal</span>
-                        <span>{formatPrice(summary.subtotalCents as number)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Tax</span>
-                        <span>{formatPrice(summary.taxCents as number)}</span>
-                      </div>
-                      <div className="mt-2 flex justify-between text-base font-semibold text-[color:var(--icecream-dark)]">
-                        <span>Total</span>
-                        <span>{formatPrice(summary.totalCents as number)}</span>
-                      </div>
-                      {summary.message ? (
-                        <p className="mt-2 text-xs uppercase tracking-wide text-[color:var(--icecream-primary)]">
-                          {summary.message as string}
-                        </p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
+              <button
+                type="button"
+                disabled={!agent || isPendingPrimary}
+                onClick={() => handleAddToCartClick(primaryCard)}
+                className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-full bg-[color:var(--icecream-primary)] px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isPendingPrimary ? "Adding..." : "Add to cart"}
+              </button>
+              {!agent ? (
+                <p className="text-xs text-center text-black/50">Scoop is getting ready to respond.</p>
+              ) : null}
+              {agent && isPendingPrimary ? (
+                <p className="text-xs text-center text-[color:var(--icecream-primary)]/80">
+                  Letting Scoop know about your pick...
+                </p>
               ) : null}
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+
+        {mode === "added" && primaryCard ? (
+          <div className="space-y-4">
+            {primaryCard.imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={primaryCard.imageUrl}
+                alt={primaryCard.name ?? "Menu item"}
+                className="h-52 w-full rounded-2xl object-cover"
+              />
+            ) : null}
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
+                Added to your tray
+              </p>
+              <h3 className="text-xl font-semibold text-[color:var(--icecream-dark)]">
+                {primaryCard.name ?? "Treat"}
+              </h3>
+              <p className="text-sm text-black/70">Scoop is keeping it chilled while you finish up.</p>
+            </div>
+            <div className="rounded-2xl bg-black/5 p-4 text-sm text-black/70">
+              <div className="flex justify-between">
+                <span>Subtotal</span>
+                <span>{resolveSummaryValue("subtotalCents")}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Tax</span>
+                <span>{resolveSummaryValue("taxCents")}</span>
+              </div>
+              <div className="mt-2 flex justify-between text-base font-semibold text-[color:var(--icecream-dark)]">
+                <span>Total</span>
+                <span>{resolveSummaryValue("totalCents")}</span>
+              </div>
+              {summaryMessage ? (
+                <p className="mt-2 text-xs uppercase tracking-wide text-[color:var(--icecream-primary)]">
+                  {summaryMessage}
+                </p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-[color:var(--icecream-dark)] px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:brightness-105"
+            >
+              Pay at the Counter
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <>
+      {card}
 
       {directions && directions.action === "show" ? (
-        <div className="pointer-events-none fixed bottom-24 left-1/2 z-30 w-full max-w-md -translate-x-1/2 px-4">
-          <div className="pointer-events-auto rounded-3xl bg-white/95 p-5 shadow-2xl backdrop-blur-md text-[color:var(--icecream-dark)]">
+        <div className="pointer-events-none fixed bottom-24 left-1/2 z-30 w-full max-w-sm -translate-x-1/2 px-4 sm:left-auto sm:right-6 sm:translate-x-0">
+          <div className="pointer-events-auto rounded-[28px] border border-white/40 bg-white/95 p-5 shadow-2xl backdrop-blur-md text-[color:var(--icecream-dark)]">
             <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
               Pickup Spot
             </p>
@@ -370,7 +427,7 @@ export function ProductShowcase() {
               <img
                 src={directions.directions[0].mapImage}
                 alt={directions.display ?? "Directions"}
-                className="mt-3 h-40 w-full rounded-xl object-cover"
+                className="mt-3 h-56 w-full rounded-xl object-cover"
               />
             ) : null}
             {directions.directions?.[0]?.hint ? (
@@ -381,8 +438,8 @@ export function ProductShowcase() {
       ) : null}
 
       {toast ? (
-        <div className="pointer-events-none fixed bottom-10 left-1/2 z-40 w-full max-w-sm -translate-x-1/2 px-4">
-          <div className="flex items-center gap-3 rounded-2xl bg-[color:var(--icecream-primary)] text-white px-4 py-3 shadow-xl">
+        <div className="pointer-events-none fixed bottom-10 left-1/2 z-40 w-full max-w-xs -translate-x-1/2 px-4 sm:left-auto sm:right-6 sm:translate-x-0">
+          <div className="flex items-center gap-3 rounded-2xl bg-[color:var(--icecream-primary)] px-4 py-3 text-white shadow-xl">
             <div className="flex-1">
               <p className="text-sm font-semibold">
                 Added {toast.qty} x {toast.product.name ?? "treat"}

@@ -46,120 +46,326 @@ else:
 
 
 SCOOP_PROMPT = r"""
-## ROLE
-You are **Scoop**, the animated concierge for Scoop Haven's experiential ice-cream kiosk. You guide guests through flavour discovery, curate their cart, and walk them to the right display. Keep the experience light, knowledgeable, and genuinely helpful.
+# Role  
+Your name is **Regina**, the animated concierge for Scoop Haven's experiential ice cream kiosk. You guide guests through flavours, build their tasting trays, and keep the visit effortless from greeting to pickup.
 
-## KNOWLEDGE BASE
-You can consult `SCOOP_KB`, which contains the full product catalog (names, descriptions, prices, images, displays) and detailed directions for every display. Treat it as the single source of truth - never invent details beyond what the KB or tools provide.
+---
 
-## TOOLKIT
-- `list_icecream_flavors(query: str, dietary: list[str])` - confirm availability or surface recommendations. For broad menu questions, pull the full menu; for specific treats, pass the exact product name so the caller receives the right record.
-- `add_to_cart(product_id: str, qty: int)` - update the shopper's order once you have a confirmed product id or name from the menu results.
-- `get_directions(display_name: str)` - share clear pickup guidance. Use the display names returned by the menu data (or the KB) so the correct card appears for the guest.
+# Personality  
+You sound warm, upbeat, and conversational. Lean into sensory language, short bursts of excitement, and playful confidence. Use natural fillers like "Great," "Absolutely," or "That makes sense" to stay human. Balance delight with focus - keep the experience fun while steering the order toward completion.
 
-Tools return structured JSON. Use the data to inform your replies, but always speak naturally; never recite raw JSON, schemas, or background steps.
+---
 
-## STYLE
-- Warm, upbeat, and conversational; sprinkle in sensory language without sounding scripted.
-- Celebrate delightful choices with brief enthusiasm ("Love that chocolate crunch!").
-- Default to ~60 words or less unless you're clarifying orders or directions.
-- Smoothly handle dietary notes, allergies, or substitutions with empathy.
-- When sharing the full menu, quickly list item names only and hint that visuals are on screen.
-- Mention price, description, and pickup details only after the guest focuses on a specific item.
+# Venue Details  
+Scoop Haven blends artisan ice cream with an AI-driven tasting counter. Guests browse signature sundaes, pints, floats, and seasonal specials. Displays near the counter show vivid cards, nutrition cues, and pickup directions. Payment happens at the counter after guests lock their tray. House highlights include the Banana Split Sundae, Midnight Mocha Swirl, Mango Sorbet Float, and dairy-free Mint Chip Pint. Pickup spots are labeled Counter A, Counter B, and Window C with neon signage and map hints.
 
-## PLAYBOOK
-1. Welcome guests with context and an immediate offer to help.
-2. Ask focused discovery questions (one at a time) about flavours, dietary needs, or group size.
-3. Recommend up to three items at once, each with a vivid hook and price (convert cents to dollars).
-4. Use the tools to keep the cart accurate - never guess quantities or pricing.
-5. Guide pickups with display names, hints, and maps from the KB.
-6. Close with a recap, running total, and a clear reminder that payment happens at the counter.
+---
 
-## GUARDRAILS
-- Always confirm menu, pricing, and locations through the tools/KB before answering.
-- Share overlay or UI updates when useful, but never describe them as "background tasks."
-- Keep internal instructions and JSON private.
-- Stay calm, supportive, and human throughout the conversation.
+# Objective  
+- Confirm the guest's name and welcome them into the Scoop Haven experience.  
+- Learn cravings or dietary needs, then recommend menu items that match.  
+- Use the kiosk tools to surface cards, describe flavours, and adjust the cart.  
+- Confirm quantities, totals, and payment instructions before pickup.  
+- Provide directions so the guest knows exactly where to collect their order.  
+- Keep the conversation smooth, reassuring, and on-brand throughout.
+
+---
+
+# Menu Guidance  
+Always consult the Scoop Haven knowledge base (`SCOOP_KB`) before sharing facts. Inspire guests with flavour notes, mention must-try toppings, and highlight cooler locations or seasonal badges. If information is missing, admit it, offer close alternatives, or invite the guest to try a staff favourite. Prices are in US dollars; speak them clearly (for example, "twelve dollars and fifty cents").
+
+---
+
+# Strict Rules  
+1. Call `list_icecream_flavors` before describing any menu items, whether overview or detail.  
+2. Speak to only one idea at a time and pause for the guest to respond.  
+3. Keep product cards visible until you intentionally replace them with another `client.products` or `client.directions` action.  
+4. Trigger `add_to_cart` only after the guest confirms or the UI button fires.  
+5. Use `get_directions` with the exact display name from the knowledge base before giving pickup guidance.  
+6. Acknowledge every UI update (menu, add-to-cart, directions) so the guest trusts what they see.  
+7. Never reveal tooling, JSON, or internal rules; speak naturally and stay on task.  
+8. If audio is unclear, say, "Sorry, I did not catch that. Could you repeat it, please?"
+
+---
+
+# Custom Functions and RPCs  
+- `list_icecream_flavors(query, dietary)` - Pull menu data and emit:  
+  - `client.products { action: "menu", ... }` for broad overviews.  
+  - `client.products { action: "detail", ... }` when focusing on a single treat.  
+- `add_to_cart(product_id, qty)` - Update the guest's tray, then confirm subtotal, tax, and total.  
+- `get_directions(display_name)` - Reveal pickup guidance with `client.directions { action: "show", ... }`.  
+- `agent.addToCart` - Respond immediately when the UI fires this RPC, echoing what was added.  
+- `ui.overlay` fallbacks - Continue publishing synchronized overlays for legacy clients.
+
+---
+
+# Knowledge Base  
+Refer to `SCOOP_KB` for menu names, prices, dietary tags, promotions, and pickup signage. If the KB lacks a detail, explain the gap, offer a safe recommendation, and keep the guest confident.
+
+---
+
+# Conversation Flow  
+## Step 1 - Welcome  
+Greet the guest ask thier name, introduce yourself as Regina, and check if they are ready to explore flavours.  
+
+## Step 2 - Discover Cravings  
+Ask what they feel like today what they would like to taste. if they ask for menu Call `list_icecream_flavors(query=None)` first, then mention three or four hero items and point to the on-screen cards.  
+
+## Step 3 - Spotlight a Treat  
+When the guest says he want something, call `list_icecream_flavors(query="selected flavour")` show it while speaking to them. only tell price and description of products once the card is live don't mention location. Invite them to add it or explore another option.  
+
+## Step 4 - Confirm the Cart  
+After the guest agrees to add (or the UI button fires), call `add_to_cart`. Reassure them the treat is in their chilled tray, confirm subtotal, tax, and total, and mention how payment works at the counter.  
+
+## Step 5 - Directions and Wrap-Up  
+When the order is set offer direction by your own or if the guest asks where to pick up, call `get_directions` with the proper display name. Narrate the on-screen map, highlight signage, and offer final tips.  
+
+## Step 6 - Close  
+Invite last questions, remind them to pay at the counter, and send them off with an enthusiastic thank-you. Keep tone joyful and concise. If they are not ready to order, offer to keep the menu handy and close politely.
 """
-
 
 OVERLAY_TOPIC = "ui.overlay"
 
 SCOOP_KB: Dict[str, Any] = {
     "product_order": [
-        "recUfA2OVZkDuDXiY",
-        "recf3DynSRt6MyeBp",
-        "recRUnwAB4o26gYKA",
-        "recABjR1DjRfPFez1",
+        "recStrCone1",
+        "recVanCup1",
+        "recCookieCream1",
+        "recMintChip1",
+        "recMangoSorbet1",
+        "recPistachio1",
+        "recRockyRoad1",
+        "recNeapolitan1",
+        "recCoffeeGelato1",
+        "recCaramelBar1",
+        "recBlueberryYogurt1",
+        "recMatchaCone1",
+        "recPeanutButter1",
+        "recRaspberryPop1",
+        "recCottonCandy1",
+        "recBananaSplit1",
+        "recButterPecan1",
+        "recTiramisu1",
+        "recLemonLime1",
+        "recChocConeOrig",
     ],
     "products": {
-        "recUfA2OVZkDuDXiY": {
+        "recStrCone1": {
+            "id": "recStrCone1",
+            "name": "Strawberry Cone",
+            "description": "Creamy strawberry ice cream in a waffle cone",
+            "priceCents": 11000,
+            "imageUrl": "https://images.pexels.com/photos/22816362/pexels-photo-22816362.jpeg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["strawberry", "cone", "fruity"],
+        },
+        "recVanCup1": {
+            "id": "recVanCup1",
+            "name": "Vanilla Cup",
+            "description": "Vanilla soft serve topped with rainbow sprinkles",
+            "priceCents": 8000,
+            "imageUrl": "https://images.pexels.com/photos/618915/pexels-photo-618915.jpeg",
+            "display": "Dairy Section",
+            "keywords": ["vanilla", "cup", "sprinkles"],
+        },
+        "recCookieCream1": {
+            "id": "recCookieCream1",
+            "name": "Cookies and Cream Cup",
+            "description": "Cookies-and-cream ice cream loaded with cookie pieces",
+            "priceCents": 8500,
+            "imageUrl": "https://images.pexels.com/photos/5060283/pexels-photo-5060283.jpeg",
+            "display": "Dairy Section",
+            "keywords": ["cookies", "cream", "cup"],
+        },
+        "recMintChip1": {
+            "id": "recMintChip1",
+            "name": "Mint Chocolate Chip Pint",
+            "description": "Mint-flavored ice cream with chocolate chips",
+            "priceCents": 9000,
+            "imageUrl": "https://images.pexels.com/photos/29851712/pexels-photo-29851712.jpeg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["mint", "chocolate chip", "pint"],
+        },
+        "recMangoSorbet1": {
+            "id": "recMangoSorbet1",
+            "name": "Mango Sorbet Cup",
+            "description": "Tropical mango sorbet in a cup",
+            "priceCents": 7500,
+            "imageUrl": "https://images.pexels.com/photos/5060450/pexels-photo-5060450.jpeg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["mango", "sorbet", "cup"],
+        },
+        "recPistachio1": {
+            "id": "recPistachio1",
+            "name": "Pistachio Scoop",
+            "description": "Rich pistachio ice cream scoop",
+            "priceCents": 8000,
+            "imageUrl": "https://images.pexels.com/photos/22809596/pexels-photo-22809596.jpeg",
+            "display": "Gelato Bar",
+            "keywords": ["pistachio", "scoop", "nutty"],
+        },
+        "recRockyRoad1": {
+            "id": "recRockyRoad1",
+            "name": "Rocky Road Sundae",
+            "description": "Chocolate ice cream with nuts and marshmallows",
+            "priceCents": 9500,
+            "imageUrl": "https://images.pexels.com/photos/30663181/pexels-photo-30663181.jpeg",
+            "display": "Bakery Display",
+            "keywords": ["rocky road", "sundae", "nuts"],
+        },
+        "recNeapolitan1": {
+            "id": "recNeapolitan1",
+            "name": "Neapolitan Scoop",
+            "description": "Three flavors of ice cream served together",
+            "priceCents": 9000,
+            "imageUrl": "https://images.pexels.com/photos/3625371/pexels-photo-3625371.jpeg",
+            "display": "Gelato Bar",
+            "keywords": ["neapolitan", "triple scoop", "dessert"],
+        },
+        "recCoffeeGelato1": {
+            "id": "recCoffeeGelato1",
+            "name": "Coffee Gelato Cup",
+            "description": "Smooth coffee-flavored gelato in a cup",
+            "priceCents": 8500,
+            "imageUrl": "https://images.pexels.com/photos/28347061/pexels-photo-28347061.jpeg",
+            "display": "Bakery Display",
+            "keywords": ["coffee", "gelato", "cup"],
+        },
+        "recCaramelBar1": {
+            "id": "recCaramelBar1",
+            "name": "Caramel Swirl Ice Cream Bar",
+            "description": "Chocolate-coated ice cream bar with caramel swirl",
+            "priceCents": 7000,
+            "imageUrl": "https://images.pexels.com/photos/4725719/pexels-photo-4725719.jpeg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["caramel", "bar", "chocolate"],
+        },
+        "recBlueberryYogurt1": {
+            "id": "recBlueberryYogurt1",
+            "name": "Blueberry Frozen Yogurt Cup",
+            "description": "Frozen yogurt topped with fresh blueberries",
+            "priceCents": 8000,
+            "imageUrl": "https://images.pexels.com/photos/30041629/pexels-photo-30041629.jpeg",
+            "display": "Dairy Section",
+            "keywords": ["blueberry", "yogurt", "frozen"],
+        },
+        "recMatchaCone1": {
+            "id": "recMatchaCone1",
+            "name": "Matcha Green Tea Cone",
+            "description": "Japanese matcha soft serve in a cone",
+            "priceCents": 10000,
+            "imageUrl": "https://images.pexels.com/photos/31371705/pexels-photo-31371705.jpeg",
+            "display": "Gelato Bar",
+            "keywords": ["matcha", "green tea", "cone"],
+        },
+        "recPeanutButter1": {
+            "id": "recPeanutButter1",
+            "name": "Peanut Butter Ice Cream Cone",
+            "description": "Peanut butter ice cream topped with crushed peanuts",
+            "priceCents": 9500,
+            "imageUrl": "https://images.pexels.com/photos/8734085/pexels-photo-8734085.jpeg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["peanut butter", "cone", "nuts"],
+        },
+        "recRaspberryPop1": {
+            "id": "recRaspberryPop1",
+            "name": "Raspberry Sorbet Popsicle",
+            "description": "Bright raspberry sorbet frozen on a stick",
+            "priceCents": 6000,
+            "imageUrl": "https://images.pexels.com/photos/6200447/pexels-photo-6200447.jpeg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["raspberry", "popsicle", "sorbet"],
+        },
+        "recCottonCandy1": {
+            "id": "recCottonCandy1",
+            "name": "Cotton Candy Cone",
+            "description": "Blue cotton candy flavored ice cream in a cone",
+            "priceCents": 8500,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9f/Scooping.jpg/960px-Scooping.jpg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["cotton candy", "cone", "blue"],
+        },
+        "recBananaSplit1": {
+            "id": "recBananaSplit1",
+            "name": "Banana Split Sundae",
+            "description": "Classic banana split with ice cream, sauce, and cherries",
+            "priceCents": 12000,
+            "imageUrl": "https://images.pexels.com/photos/5570887/pexels-photo-5570887.jpeg",
+            "display": "Bakery Display",
+            "keywords": ["banana", "sundae", "cherries"],
+        },
+        "recButterPecan1": {
+            "id": "recButterPecan1",
+            "name": "Butter Pecan Ice Cream",
+            "description": "Creamy butter pecan ice cream with caramel",
+            "priceCents": 9500,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/e/ed/Butter_pecan_caramel_ice_cream.jpg",
+            "display": "Dairy Section",
+            "keywords": ["butter pecan", "ice cream", "caramel"],
+        },
+        "recTiramisu1": {
+            "id": "recTiramisu1",
+            "name": "Tiramisu Gelato Cup",
+            "description": "Italian tiramisu gelato layered with cocoa",
+            "priceCents": 10000,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/d/d6/Tiramisu_ice_cream,_Pabbas,_Mangalore,_Karnataka,_001.jpg",
+            "display": "Gelato Bar",
+            "keywords": ["tiramisu", "gelato", "dessert"],
+        },
+        "recLemonLime1": {
+            "id": "recLemonLime1",
+            "name": "Lemon Lime Sherbet Cup",
+            "description": "Refreshing lemon-lime sherbet in an elegant glass",
+            "priceCents": 7000,
+            "imageUrl": "https://images.pexels.com/photos/28376175/pexels-photo-28376175.jpeg",
+            "display": "Freezer Aisle 2",
+            "keywords": ["lemon", "lime", "sherbet"],
+        },
+        "recChocConeOrig": {
             "id": "recUfA2OVZkDuDXiY",
             "name": "Chocolate Cone",
             "description": "Belgian chocolate in a crisp cone",
             "priceCents": 12000,
-            "imageUrl": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_gzpq1igzpq1igzpq.png",
+            "imageUrl": "https://images.pexels.com/photos/22484701/pexels-photo-22484701.jpeg",
             "display": "Freezer Aisle 2",
             "keywords": ["chocolate", "cone", "signature"],
-        },
-        "recf3DynSRt6MyeBp": {
-            "id": "recf3DynSRt6MyeBp",
-            "name": "Salted Caramel Pretzel Bites",
-            "description": "Crunchy pretzel bites coated in salted caramel",
-            "priceCents": 6500,
-            "imageUrl": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_m9cl4em9cl4em9cl.png",
-            "display": "Pantry Section 1",
-            "keywords": ["salted caramel", "pretzel", "snack"],
-        },
-        "recRUnwAB4o26gYKA": {
-            "id": "recRUnwAB4o26gYKA",
-            "name": "Sparkling Lemonade Can",
-            "description": "Refreshing sparkling lemonade, 330 ml can",
-            "priceCents": 3500,
-            "imageUrl": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_z5n85gz5n85gz5n8.png",
-            "display": "Beverage Corner",
-            "keywords": ["lemonade", "drink", "sparkling"],
-        },
-        "recABjR1DjRfPFez1": {
-            "id": "recABjR1DjRfPFez1",
-            "name": "Vanilla Almond Protein Bar",
-            "description": "High-protein bar with vanilla and almonds",
-            "priceCents": 4500,
-            "imageUrl": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_5bxf2o5bxf2o5bxf.png",
-            "display": "Bakery Display",
-            "keywords": ["protein", "bar", "vanilla"],
         },
     },
     "displays": {
         "Freezer Aisle 2": {
             "displayName": "Freezer Aisle 2",
             "hint": "Look for the blue freezer sign above the aisle.",
-            "mapImage": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_zfr9xazfr9xazfr9.png",
+            "mapImage": "https://images.pexels.com/photos/29834274/pexels-photo-29834274.jpeg",
         },
         "Dairy Section": {
             "displayName": "Dairy Section",
             "hint": "Dairy sign is large and blue.",
-            "mapImage": "https://v5.airtableusercontent.com/.../abstract_33.png",
+            "mapImage": "https://images.pexels.com/photos/20489330/pexels-photo-20489330.jpeg",
         },
         "Beverage Corner": {
             "displayName": "Beverage Corner",
             "hint": "Cooler is next to the bakery section.",
-            "mapImage": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_vkk0qxvkk0qxvkk0.png",
+            "mapImage": "https://images.pexels.com/photos/3230214/pexels-photo-3230214.jpeg",
         },
         "Produce Aisle 4": {
             "displayName": "Produce Aisle 4",
             "hint": "Look for green signage above the aisle.",
-            "mapImage": "https://v5.airtableusercontent.com/.../abstract_40.png",
+            "mapImage": "https://images.pexels.com/photos/28670064/pexels-photo-28670064.jpeg",
         },
         "Bakery Display": {
             "displayName": "Bakery Display",
             "hint": "Pastry display is glass-fronted.",
-            "mapImage": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_xrgqhkxrgqhkxrgq.png",
+            "mapImage": "https://images.pexels.com/photos/30667453/pexels-photo-30667453.jpeg",
         },
         "Pantry Section 1": {
             "displayName": "Pantry Section 1",
             "hint": "Bins are labeled with yellow tags.",
-            "mapImage": "https://v5.airtableusercontent.com/.../Gemini_Generated_Image_2gc2mp2gc2mp2gc2.png",
+            "mapImage": "https://images.pexels.com/photos/11296793/pexels-photo-11296793.jpeg",
+        },
+        "Gelato Bar": {
+            "displayName": "Gelato Bar",
+            "hint": "Colorful gelato flavors are visible in trays behind glass.",
+            "mapImage": "https://images.pexels.com/photos/8713075/pexels-photo-8713075.jpeg",
         },
     },
 }
@@ -471,7 +677,7 @@ class ScoopTools:
         dietary: Optional[list[str]] = None,
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
-        """Search for ice-cream treats and curated picks. Returns menu items with prices (in cents)."""
+        """Search for ice-cream treats. RPC: client.products (menu/detail) + overlay fallback."""
         simplified_products: List[Dict[str, Any]] = []
         requested_name = (query or "").strip().lower()
         requested_names: List[str]
@@ -589,7 +795,7 @@ class ScoopTools:
         qty: int = 1,
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
-        """Add a product to the shopper's cart. Use menu results to pick the correct product_id."""
+        """Add a product to the cart. RPC: client.products(action='added') + cart overlay."""
         product = self._catalog.get(product_id)
         if not product:
             product = self._catalog_by_name.get(product_id.lower()) if product_id else None
@@ -660,7 +866,7 @@ class ScoopTools:
         display_name: str,
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
-        """Get wayfinding information for a product display."""
+        """Get wayfinding information for a display. RPC: client.directions + overlay fallback."""
         normalized_display = self._canonical_display_name(display_name)
         logger.info(
             "get_directions called for display '%s' (normalized '%s')",

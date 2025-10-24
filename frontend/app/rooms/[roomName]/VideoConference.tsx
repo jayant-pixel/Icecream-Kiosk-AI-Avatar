@@ -42,7 +42,7 @@ export function VideoConference({
       className="relative flex h-screen w-full flex-col overflow-hidden"
       {...props}
     >
-      <div className="relative flex-1 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+      <div className="relative flex flex-1 items-center justify-center bg-black/30 backdrop-blur-sm">
         {avatarTrack ? (
           <VideoTrack
             className="h-full w-full max-w-[1200px] object-contain"
@@ -60,10 +60,14 @@ export function VideoConference({
             </div>
           </div>
         )}
-      </div>
-      <ProductShowcase />
-      <div className="absolute inset-x-0 bottom-32 flex justify-center px-4 pointer-events-none">
-        <OverlayLayer />
+        <div className="pointer-events-none absolute inset-x-0 bottom-28 flex w-full justify-center px-4 sm:inset-y-0 sm:right-10 sm:bottom-auto sm:top-1/2 sm:inset-x-auto sm:-translate-y-1/2 sm:justify-end sm:px-0 sm:transform">
+          <div className="flex w-full max-w-sm flex-col gap-4 sm:items-end">
+            <ProductShowcase />
+            <div className="pointer-events-auto">
+              <OverlayLayer />
+            </div>
+          </div>
+        </div>
       </div>
       <div className="absolute inset-x-0 bottom-0 flex justify-center px-4 pb-6 sm:pb-10 pointer-events-none">
         <div className="pointer-events-auto">

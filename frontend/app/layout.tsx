@@ -28,8 +28,8 @@ const plusJakarta = Plus_Jakarta_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "LiveKit Meet Agents",
-  description: "LiveKit Meet with AI Agents",
+  title: "AI Avatar Agent",
+  description: "Immersive LiveKit kiosk powered by the Scoop AI avatar.",
 };
 
 export const viewport: Viewport = {
