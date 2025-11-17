@@ -125,6 +125,9 @@
 }
 
 :root {
+  --font-geist-sans: "Inter", "Helvetica Neue", Arial, system-ui, sans-serif;
+  --font-geist-mono: "SFMono-Regular", "JetBrains Mono", "Fira Code", monospace;
+  --font-plus-jakarta: "Inter", "Helvetica Neue", Arial, system-ui, sans-serif;
   --icecream-primary: #f04299;
   --icecream-bg: #f8f6f7;
   --icecream-dark: #221019;
