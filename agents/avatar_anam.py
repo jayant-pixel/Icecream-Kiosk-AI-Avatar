@@ -93,27 +93,27 @@ Flavor/Topping behavior:
 ## PLAYBOOK
 1. **Welcome & Setup**
    - "Hi! Welcome to Baskin Robbins Al Quoz, I'm Sarah. What's your name?"
-   - "Nice to meet you, {name}. Are you craving a Cup, Sundae Cup, or Milk Shake today?"
+   - Follow with: "What kind of mood are you in today—rich chocolate, bright berries, or something indulgent?"
+   - Introduce categories every time: "We can do classic Cups, Sundae Cups stacked with toppings, or Milk Shakes." If they look unsure, explain a Sundae is simply a cup with toppings piled on.
    - Keep the screen clear until they ask for options; then call `list_menu("products")` (menu grid left).
 
-2. **Discover Cravings & Guide Choice**
-   - Ask focused questions: "Chocolatey or fruity?" "Light or fully loaded with toppings?"
-   - Use `list_menu("products", category=...)` to show Cups, Sundae Cups, or Milk Shakes as needed.
-   - When discussing flavors, call `list_menu("flavors")` and summarize by groups (Choco, Berry, Classics/Others, SugarLess). Only promise sugar-free options that exist in the KB.
+2. **Guide Choice by Category**
+   - Use mood cues to suggest categories. Ask: "Should we go Cup, Sundae, or Milk Shake?" then open the relevant grid via `list_menu("products", category=...)`.
+   - When discussing flavors, call `list_menu("flavors")` and summarize by Chocolate / Berry / Classics / Sugarless.
 
 3. **Case Flows**
-   - **Cups**: confirm size (Kids, Value, Emlaaq). Free flavors = scoops; toppings always charged. Let the guest review the menu+detail layout, then move into the flavor/topping panels on the right before `add_to_cart`.
-   - **Sundae Cups**: confirm size. Free flavors = scoops; free toppings per KB (default 2). Extra toppings cost 5 or 6 dirham. Use the flavor/topping panels after the menu slides away, then summarize totals before `add_to_cart`.
-   - **Milk Shakes (Fixed + Make Your Own)**: confirm size (Regular/Large) or highlight MYO's 3 scoops. Toppings always charged. Use the same menu/detail/panel choreography when configuring, then `add_to_cart`.
+   - **Cups**: confirm size (Kids/Value/Emlaaq) immediately, remind them how many flavors that size includes, then capture flavors. Offer toppings afterward and, if they add several, suggest upgrading to the matching Sundae for value.
+   - **Sundae Cups**: confirm size, highlight they can pick the same number of flavors as scoops, then lead them into toppings (two free unless KB overrides). Always mention free vs paid toppings.
+   - **Milk Shakes**: ask if they want a fixed recipe or Make-Your-Own. Confirm size (Regular/Large). For MYO, remind them it includes three flavors + unlimited paid toppings. Show no more than four shake cards per size when browsing.
 
-4. **Quick Orders**
-   - If a guest gives a fully specified item, validate via KB and confirm without extra probing.
-   - If details are missing (size, flavors, toppings), ask only what's missing.
-   - For multi-item orders, configure each item, then share the combined total in dirham.
+4. **Quick / Regular Orders**
+   - If a guest gives a full spec (e.g., "Single Value Scoop Cup with Blue Berry Crumble, no toppings"), confirm details, note any remaining scoops/toppings they’re entitled to, and run the tools without extra browsing.
+   - If a Sundae order includes explicit toppings ("Triple Value Sundae with Chocolate chips, Blueberry Crumble, Love Potion 31"), confirm quantity and whether they want another flavor before adding to cart.
+   - For multi-item orders, handle each sequentially, summarizing totals after every addition.
 
 5. **Cart, Directions & Close**
-   - After each `add_to_cart`, let the guest know the cart overlay now lives on the **right column** and read totals in dirham. Ask if they want anything else.
-   - When finished, call `get_directions(display_name)`; describe the pickup card on the right and remind them payment happens at the counter.
+   - Before each `add_to_cart`, restate size, flavors, toppings, and quantity, then quote the price in dirham. After adding, point out the cart overlay on the right with subtotal/tax/total and ask if they need anything else.
+   - Offer pickup directions (`get_directions`) once ordering is done, referencing Ice Cream Bar / Sundae Counter / Milkshake Bar.
    - Close warmly: "Thank you, {name}. Enjoy your ice cream!"
 
 ## GUARDRAILS
@@ -647,6 +647,10 @@ class ScoopTools:
         self._cart_summary: Dict[str, Any] = {}
         self._active_product_id: Optional[str] = None
         self._product_tokens_cache: Dict[str, set[str]] = {}
+        self._flavor_tokens_cache: Dict[str, set[str]] = {}
+        self._topping_tokens_cache: Dict[str, set[str]] = {}
+        self._flavor_name_index = self._build_name_index(self._flavors)
+        self._topping_name_index = self._build_name_index(self._toppings)
 
     async def _emit_client_rpc(self, ctx: "RunCtxParam", method: str, payload: Dict[str, Any]) -> None:
         run_ctx = cast(Optional[RunContext], ctx) if ctx else None
@@ -741,6 +745,83 @@ class ScoopTools:
             return None
         s = size.strip().lower()
         return self.SIZE_ALIAS.get(s, size.title())
+
+    def _normalize_label(self, value: Optional[str]) -> str:
+        if not value:
+            return ""
+        return re.sub(r"[^a-z0-9]", "", value.lower())
+
+    def _tokens_for_label(self, value: Optional[str]) -> set[str]:
+        tokens = self._tokenize(value)
+        normalized = self._normalize_label(value)
+        if normalized:
+            tokens.add(normalized)
+            if normalized.endswith("s") and len(normalized) > 1:
+                tokens.add(normalized[:-1])
+        return tokens
+
+    def _build_name_index(self, entries: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+        index: Dict[str, List[str]] = {}
+        for entry_id, entry in entries.items():
+            normalized = self._normalize_label(entry.get("name"))
+            if not normalized:
+                continue
+            index.setdefault(normalized, []).append(entry_id)
+            if normalized.endswith("s") and len(normalized) > 1:
+                index.setdefault(normalized[:-1], []).append(entry_id)
+        return index
+
+    def _resolve_catalog_entry(
+        self,
+        ref: Any,
+        entries: Dict[str, Dict[str, Any]],
+        name_index: Dict[str, List[str]],
+        token_cache: Dict[str, set[str]],
+    ) -> Optional[Dict[str, Any]]:
+        if not ref:
+            return None
+        lookup_value = ref
+        if isinstance(ref, dict):
+            lookup_value = ref.get("id") or ref.get("name")
+        if lookup_value is None:
+            return None
+        lookup_str = str(lookup_value)
+        direct = entries.get(lookup_str)
+        if direct:
+            return direct
+        normalized = self._normalize_label(lookup_str)
+        if normalized:
+            for match_id in name_index.get(normalized, []):
+                match = entries.get(match_id)
+                if match:
+                    return match
+        tokens = self._tokens_for_label(lookup_str)
+        if not tokens:
+            return None
+        best: Optional[Dict[str, Any]] = None
+        best_score = 0.0
+        for entry_id, entry in entries.items():
+            if entry_id not in token_cache:
+                token_cache[entry_id] = self._tokens_for_label(entry.get("name"))
+            entry_tokens = token_cache[entry_id]
+            if not entry_tokens:
+                continue
+            overlap = len(tokens & entry_tokens)
+            if not overlap:
+                continue
+            coverage = overlap / len(tokens)
+            if coverage >= 1.0:
+                return entry
+            if coverage > best_score:
+                best = entry
+                best_score = coverage
+        return best if best_score >= 0.5 else None
+
+    def _resolve_flavor(self, ref: Any) -> Optional[Dict[str, Any]]:
+        return self._resolve_catalog_entry(ref, self._flavors, self._flavor_name_index, self._flavor_tokens_cache)
+
+    def _resolve_topping(self, ref: Any) -> Optional[Dict[str, Any]]:
+        return self._resolve_catalog_entry(ref, self._toppings, self._topping_name_index, self._topping_tokens_cache)
 
     def _tokenize(self, value: Optional[str]) -> set[str]:
         tokens: set[str] = set()
@@ -1082,10 +1163,12 @@ class ScoopTools:
         policy = self._flavor_policy()
         extra_price = Decimal(str(policy.get("defaultFlavorPriceAED", 0.0)))
         selected: List[Dict[str, Any]] = []
-        for idx, fid in enumerate(flavor_ids):
-            flavor = self._flavors.get(fid)
-            if not flavor:
-                continue
+        resolved_flavors: List[Dict[str, Any]] = []
+        for raw in flavor_ids:
+            flavor = self._resolve_flavor(raw)
+            if flavor:
+                resolved_flavors.append(flavor)
+        for idx, flavor in enumerate(resolved_flavors):
             is_extra = free_flavors <= 0 or idx >= free_flavors
             selected.append(
                 {
@@ -1137,13 +1220,15 @@ class ScoopTools:
         policy = self._topping_policy()
         default_price = Decimal(str(policy.get("extraToppingPriceAED", 5.0)))
         selected: List[Dict[str, Any]] = []
+        resolved_toppings: List[Dict[str, Any]] = []
         free_remaining = free_total
         extra_count = 0
         extra_charge = Decimal("0.00")
-        for tid in topping_ids:
-            topping = self._toppings.get(tid)
-            if not topping:
-                continue
+        for raw in topping_ids:
+            topping = self._resolve_topping(raw)
+            if topping:
+                resolved_toppings.append(topping)
+        for topping in resolved_toppings:
             price = Decimal(str(topping.get("priceAED") or default_price))
             is_free = free_remaining > 0
             if is_free:
@@ -1228,6 +1313,7 @@ class ScoopTools:
             "name": product.get("name"),
             "category": product.get("category"),
             "size": product.get("size"),
+            "imageUrl": product.get("imageUrl"),
             "qty": qty,
             "flavors": flavors_simple,
             "toppings": toppings_simple,

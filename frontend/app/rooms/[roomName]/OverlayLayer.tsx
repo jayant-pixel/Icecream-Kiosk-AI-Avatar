@@ -121,6 +121,8 @@ type CartItem = {
   name?: string;
   category?: string;
   size?: string | null;
+  imageUrl?: string | null;
+  display?: string | null;
   qty?: number;
   flavors?: CartFlavor[];
   toppings?: CartTopping[];
@@ -326,56 +328,62 @@ export function OverlayLayer() {
 
   const showMenuColumn = Boolean(detailElement && menuCache && !panelLayer);
 
+  const renderCard = useCallback((content: ReactNode, widthClass: string) => {
+    if (!content) {
+      return null;
+    }
+    return (
+      <div className={clsx("w-full rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl", widthClass)}>
+        {content}
+      </div>
+    );
+  }, []);
+
   let overlayBody: ReactNode = null;
+  const containerClass = "w-full max-w-[1400px] px-[5vw]";
 
   if (activeLayer === "cart" && cartPayload?.cart) {
     overlayBody = (
-      <div className="flex w-full max-w-[1400px] justify-end">
-        <div className="w-full max-w-[420px] rounded-[28px] border border-black/5 bg-white/95 p-4 shadow-2xl">
-          <CartOverlay payload={cartPayload.cart} />
-        </div>
+      <div className={clsx(containerClass, "ml-auto flex justify-end")}>
+        {renderCard(<CartOverlay payload={cartPayload.cart} />, "max-w-[420px]")}
       </div>
     );
   } else if (activeLayer === "directions" && directionsPayload) {
     overlayBody = (
-      <div className="flex w-full max-w-[1400px] justify-end">
-        <div className="w-full max-w-[420px] rounded-[28px] border border-black/5 bg-white/95 p-4 shadow-2xl">
-          <DirectionsOverlay payload={directionsPayload} />
-        </div>
+      <div className={clsx(containerClass, "ml-auto flex justify-end")}>
+        {renderCard(<DirectionsOverlay payload={directionsPayload} />, "max-w-[420px]")}
       </div>
     );
   } else if (panelContent && detailElement) {
     overlayBody = (
-      <div className="flex w-full max-w-[1400px] flex-col gap-4 pl-6 lg:flex-row lg:items-start lg:justify-start">
-        <div className="w-full max-w-[520px] rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl">{detailElement}</div>
-        <div className="w-full max-w-[340px] rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl">{panelContent}</div>
+      <div className={clsx(containerClass, "mx-auto flex items-start justify-between gap-6")}>
+        {renderCard(detailElement, "max-w-[580px]")}
+        {renderCard(panelContent, "max-w-[360px]")}
       </div>
     );
   } else if (showMenuColumn && detailElement && menuCache) {
     overlayBody = (
-      <div className="flex w-full max-w-[1400px] flex-col gap-4 pl-6 lg:flex-row lg:items-start lg:justify-start">
-        <div className="w-full max-w-[520px] rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl">
-          <ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />
-        </div>
-        <div className="w-full max-w-[520px] rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl">{detailElement}</div>
+      <div className={clsx(containerClass, "mx-auto flex items-start justify-between gap-6")}>
+        {renderCard(<ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />, "max-w-[600px]")}
+        {renderCard(detailElement, "max-w-[580px]")}
       </div>
     );
   } else if (detailElement) {
     overlayBody = (
-      <div className="flex w-full max-w-[1200px] justify-start pl-6">
-        <div className="w-full max-w-[560px] rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl">{detailElement}</div>
+      <div className={clsx(containerClass, "flex justify-start")}>
+        {renderCard(detailElement, "max-w-[580px]")}
       </div>
     );
   } else if (gridElement) {
     overlayBody = (
-      <div className="flex w-full max-w-[1200px] justify-start pl-6">
-        <div className="w-full max-w-[640px] rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl">{gridElement}</div>
+      <div className={clsx(containerClass, "flex justify-start")}>
+        {renderCard(gridElement, "max-w-[640px]")}
       </div>
     );
   } else if (panelContent) {
     overlayBody = (
-      <div className="flex w-full max-w-[1400px] justify-end">
-        <div className="w-full max-w-[340px] rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl">{panelContent}</div>
+      <div className={clsx(containerClass, "ml-auto flex justify-end")}>
+        {renderCard(panelContent, "max-w-[360px]")}
       </div>
     );
   }
@@ -385,7 +393,7 @@ export function OverlayLayer() {
   }
 
   return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 py-8 sm:px-6">
+    <div className="pointer-events-none absolute inset-0 flex items-start justify-center px-4 py-8 sm:px-6">
       <div className="pointer-events-auto w-full">{overlayBody}</div>
     </div>
   );
@@ -500,7 +508,7 @@ function ProductDetailOverlay({
               <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{product?.category}</p>
               <h2 className="text-2xl font-semibold">{product?.name ?? "Treat"}</h2>
               <p className="text-sm text-black/60">
-                Size: {product?.size ?? "—"}
+                Size: {product?.size ?? "-"}
                 {typeof product?.scoops === "number" ? ` · ${product?.scoops} scoop${product?.scoops === 1 ? "" : "s"}` : null}
               </p>
               {product.display ? <p className="text-xs text-black/60">Pickup: {product.display}</p> : null}
@@ -511,7 +519,7 @@ function ProductDetailOverlay({
             <div className="rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
               Free Flavors: {product?.scoops ?? 0}
               <br />
-              Free Toppings: {product?.includedToppings ?? 0}
+              Free Toppings: {product?.includedToppings ?? 0} ({product?.category ?? "Treat"})
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
               <ActionPill label="Choose Flavors" />
@@ -549,13 +557,17 @@ function ProductDetailOverlay({
 
 function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
   const selectedCount = payload.selectedFlavorIds?.length ?? payload.selectedFlavors?.length ?? 0;
-  const dots = buildScoopsDots(payload.freeFlavors ?? 0, selectedCount);
+  const freeAllotment = payload.freeFlavors ?? selectedCount;
+  const totalSlots = payload.maxFlavors ?? freeAllotment;
+  const usedScoops = payload.usedFreeFlavors ?? Math.min(selectedCount, freeAllotment);
+  const dots = buildScoopsDots(totalSlots, selectedCount);
   return (
     <div className="space-y-3">
       <OverlaySectionHeader title="Choose Your Flavors" subtitle={payload.productName} />
-      <div className="flex items-center gap-2 text-sm font-semibold text-black/70">
+      <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-black/70">
         <span>Scoops available:</span>
         <div className="flex items-center gap-1">{dots}</div>
+        <span className="text-xs font-medium text-black/50">({usedScoops} of {totalSlots} used)</span>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wide text-black/60">
         {FLAVOR_TABS.map((tab) => (
@@ -570,29 +582,31 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
           </span>
         ))}
       </div>
-      <div className="max-h-[50vh] overflow-y-auto pr-2">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="max-h-[50vh] overflow-y-auto pr-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-2">
           {(payload.flavors ?? []).map((flavor) => {
             const selected = payload.selectedFlavorIds?.includes(flavor.id ?? "");
             return (
               <article
                 key={flavor.id ?? flavor.name}
                 className={clsx(
-                  "rounded-2xl border px-3 py-4 text-center",
-                  selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)]/5" : "border-black/5"
+                  "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all",
+                  selected && "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
                 )}
               >
-                <CardImage src={flavor.imageUrl} alt={flavor.name} className="h-28 bg-white" contain />
-                <p className="mt-2 text-sm font-semibold">{flavor.name}</p>
-                <p className="text-[10px] uppercase tracking-wide text-black/50">{flavor.classification ?? ""}</p>
+                <CardImage src={flavor.imageUrl} alt={flavor.name} className="h-32 bg-white" contain />
+                <div className="mt-3 space-y-1">
+                  <p className="text-base font-semibold text-[color:var(--icecream-dark)]">{flavor.name}</p>
+                  <p className="text-[11px] uppercase tracking-wide text-black/50">{flavor.classification ?? ""}</p>
+                </div>
                 <button
                   type="button"
                   className={clsx(
-                    "mt-2 inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-semibold",
-                    selected ? "bg-[color:var(--icecream-primary)] text-white" : "bg-black/10 text-black/70"
+                    "mt-4 inline-flex w-full items-center justify-center rounded-full border px-4 py-2 text-sm font-semibold",
+                    selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-white" : "border-black/10 bg-white text-black/70"
                   )}
                 >
-                  {selected ? "Selected" : "Select"}
+                  {selected ? "Selected ✓" : "Select"}
                 </button>
               </article>
             );
@@ -617,25 +631,38 @@ function ToppingsOverlay({ payload }: { payload: ToppingOverlayPayload }) {
   const selectedIds = new Set(payload.selectedToppingIds ?? []);
   const groupFive = toppings.filter((topping) => !topping.priceAED || topping.priceAED <= 5.01);
   const groupSix = toppings.filter((topping) => topping.priceAED && topping.priceAED > 5.01);
+  const selectedToppings = payload.selectedToppings ?? [];
+  const freeSelected = selectedToppings.filter((topping) => topping.isFree).length;
+  const extraSelected = Math.max(selectedToppings.length - freeSelected, 0);
+  const extraCost = selectedToppings.filter((topping) => !topping.isFree).reduce((sum, topping) => sum + (topping.priceAED ?? 0), 0);
   return (
     <div className="space-y-3">
       <OverlaySectionHeader title="Add Toppings" subtitle={payload.note ?? payload.productName} />
       <div className="rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
-        Free toppings remaining: {payload.freeToppingsRemaining ?? 0}
+        <p>
+          Free toppings remaining: {payload.freeToppingsRemaining ?? 0}
+          {payload.category ? ` (${payload.category})` : ""}
+        </p>
+        <p className="text-[11px] text-black/50">Extra toppings cost 5 or 6 dirham each.</p>
       </div>
-      <ToppingPriceGroup title="Toppings – 5 dirham" items={groupFive} selectedIds={selectedIds} />
-      <ToppingPriceGroup title="Toppings – 6 dirham" items={groupSix} selectedIds={selectedIds} />
-      <div className="flex items-center justify-between rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
-        <span>
-          Selected: {payload.selectedToppings?.map((topping) => topping.name).filter(Boolean).join(", ") || "None"}
-        </span>
-        <span>
-          Free: {(payload.freeToppings ?? 0) - (payload.freeToppingsRemaining ?? 0)} · Extra: {Math.max((payload.selectedToppings?.length ?? 0) - (payload.freeToppings ?? 0), 0)}
-        </span>
+      <div className="max-h-[50vh] space-y-4 overflow-y-auto pr-3">
+        <ToppingPriceGroup title="Toppings - 5 dirham" items={groupFive} selectedIds={selectedIds} />
+        <ToppingPriceGroup title="Toppings - 6 dirham" items={groupSix} selectedIds={selectedIds} />
       </div>
-      <div className="flex items-center justify-end gap-2">
-        <ActionPill label="Clear" minimal />
-        <ActionPill label="Confirm" />
+      <div className="space-y-2 rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span>
+            Selected: {payload.selectedToppings?.map((topping) => topping.name).filter(Boolean).join(", ") || "None"}
+          </span>
+          <span>
+            Free: {freeSelected} · Extra: {extraSelected}
+            {extraSelected > 0 ? ` (+${formatDirham(extraCost)})` : ""}
+          </span>
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <ActionPill label="Clear" minimal />
+          <ActionPill label="Confirm" />
+        </div>
       </div>
     </div>
   );
@@ -651,24 +678,60 @@ function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["car
       ) : (
         <div className="space-y-3">
           {items.map((item) => (
-            <article key={item.lineId ?? item.product_id ?? item.name} className="space-y-2 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-base font-semibold">{item.name}</p>
-                  <p className="text-xs text-black/60">{item.category}</p>
+            <article key={item.lineId ?? item.product_id ?? item.name} className="space-y-3 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm">
+              <div className="flex gap-3">
+                <div className="h-20 w-20 shrink-0">
+                  <CardImage src={item.imageUrl} alt={item.name} className="h-20 w-20" contain />
+                </div>
+                <div className="flex-1 space-y-1">
+                  <p className="text-base font-semibold">
+                    {item.name}
+                    {item.size ? ` — ${item.size}` : ""}
+                    {item.category ? ` (${item.category})` : ""}
+                  </p>
+                  {item.display ? <p className="text-xs text-black/50">Pickup: {item.display}</p> : null}
+                  <div className="flex flex-wrap gap-3 text-[11px] text-black/60">
+                    <span>Base {formatDirham(item.basePriceAED)}</span>
+                    {item.flavorExtrasAED ? <span>Flavors +{formatDirham(item.flavorExtrasAED)}</span> : null}
+                    {item.toppingExtrasAED ? <span>Toppings +{formatDirham(item.toppingExtrasAED)}</span> : null}
+                  </div>
+                </div>
+              </div>
+              {item.flavors?.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {item.flavors.map((flavor) => (
+                    <span key={flavor.id ?? flavor.name} className="rounded-full bg-black/5 px-3 py-1 text-xs">
+                      {flavor.name}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-black/50">No flavors selected.</p>
+              )}
+              {item.toppings?.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {item.toppings.map((topping) => (
+                    <span
+                      key={topping.id ?? topping.name}
+                      className={clsx(
+                        "rounded-full px-3 py-1 text-xs",
+                        topping.isFree ? "bg-black/5 text-black/70" : "bg-[color:var(--icecream-primary)]/10 text-[color:var(--icecream-primary)]"
+                      )}
+                    >
+                      {topping.name}
+                      {topping.isFree ? "" : ` (+${formatDirham(topping.priceAED)})`}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-black/50">No toppings added.</p>
+              )}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs text-black/60">
+                  Qty:
+                  <QuantityBadge value={item.qty ?? 1} />
                 </div>
                 <div className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(item.lineTotalAED)}</div>
-              </div>
-              <p className="text-xs text-black/60">Size: {item.size ?? "—"}</p>
-              {item.flavors?.length ? (
-                <p className="text-xs text-black/60">Flavours: {item.flavors.map((flavor) => flavor.name).filter(Boolean).join(", ")}</p>
-              ) : null}
-              {item.toppings?.length ? (
-                <p className="text-xs text-black/60">Toppings: {item.toppings.map((topping) => topping.name).filter(Boolean).join(", ")}</p>
-              ) : null}
-              <div className="flex items-center gap-3 text-xs text-black/60">
-                Qty:
-                <QuantityBadge value={item.qty ?? 1} />
               </div>
             </article>
           ))}
@@ -710,7 +773,11 @@ function DirectionsOverlay({ payload }: { payload: DirectionsOverlayPayload }) {
     const location = locations[0];
     return (
       <div className="space-y-4">
-        <OverlaySectionHeader title="Pickup Instructions" subtitle={`Location: ${location.displayName ?? "—"}`} showBack />
+        <OverlaySectionHeader title="Pickup Instructions" subtitle={`Location: ${location.displayName ?? "-"}`} showBack />
+        <div className="rounded-3xl border border-black/5 bg-white/95 p-4 text-sm text-black/70">
+          <p>Pickup For: Your Order</p>
+          <p>Location: {location.displayName ?? "-"}</p>
+        </div>
         <CardImage src={location.mapImage} alt={location.displayName} className="h-64" />
         <p className="text-sm text-black/70">Hint: {location.hint ?? "Check the signage by the counter."}</p>
         {location.products?.length ? (
@@ -728,22 +795,22 @@ function DirectionsOverlay({ payload }: { payload: DirectionsOverlayPayload }) {
       <OverlaySectionHeader title="Pickup Instructions" showBack />
       <div className="space-y-3">
         {locations.map((location, index) => (
-          <article key={location.displayName ?? index} className="rounded-2xl border border-black/5 bg-white/95 p-4 shadow-sm">
-            <p className="text-sm font-semibold">Step {index + 1} – {location.displayName}</p>
-            {location.products?.length ? (
-              <p className="text-xs text-black/60">Collect: {location.products.join(", ")}</p>
-            ) : null}
-            <p className="text-xs text-black/60">Hint: {location.hint ?? "Look for Scoop signage."}</p>
-            {location.mapImage ? (
-              <a
-                href={location.mapImage}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center text-xs font-semibold text-[color:var(--icecream-primary)]"
-              >
-                View Photo
-              </a>
-            ) : null}
+          <article key={location.displayName ?? index} className="space-y-2 rounded-2xl border border-black/5 bg-white/95 p-4 shadow-sm">
+            <p className="text-sm font-semibold">Step {index + 1} – {location.displayName ?? `Station ${index + 1}`}</p>
+            <div className="space-y-1 text-xs text-black/60">
+              {location.products?.length ? <p>• Collect: {location.products.join(", ")}</p> : null}
+              <p>• Hint: {location.hint ?? "Look for Scoop signage."}</p>
+              {location.mapImage ? (
+                <a
+                  href={location.mapImage}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center font-semibold text-[color:var(--icecream-primary)]"
+                >
+                  • View Photo
+                </a>
+              ) : null}
+            </div>
           </article>
         ))}
       </div>
@@ -759,9 +826,12 @@ function UpgradeBanner({ payload }: { payload: UpgradeOverlayPayload }) {
   if (!payload.show || !payload.toProduct) {
     return null;
   }
+  const primaryLabel = payload.uiCopy?.primaryCtaLabel ?? `Upgrade to ${payload.toProduct.name}`;
+  const secondaryLabel = payload.uiCopy?.secondaryCtaLabel ?? "Keep Current Choice";
   return (
     <div className="rounded-[28px] border border-dashed border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)]/5 p-4">
-      <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">
+      <p className="flex items-center gap-2 text-sm font-semibold text-[color:var(--icecream-primary)]">
+        <span aria-hidden="true" className="text-lg">💡</span>
         {payload.uiCopy?.bannerTitle ?? "Better Value Suggestion"}
       </p>
       <div className="mt-3 flex flex-col gap-4 sm:flex-row">
@@ -775,8 +845,8 @@ function UpgradeBanner({ payload }: { payload: UpgradeOverlayPayload }) {
         </div>
       </div>
       <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold">
-        <ActionPill label={payload.uiCopy?.primaryCtaLabel ?? "Upgrade"} />
-        <ActionPill label={payload.uiCopy?.secondaryCtaLabel ?? "Keep Current Choice"} minimal />
+        <ActionPill label={primaryLabel} />
+        <ActionPill label={secondaryLabel} minimal />
       </div>
     </div>
   );
@@ -789,11 +859,13 @@ function SizeOptions({ sizeOptions }: { sizeOptions?: SizeOption[] }) {
   return (
     <div className="space-y-2 rounded-[28px] border border-black/5 bg-white/95 p-4">
       <p className="text-sm font-semibold">Size Options</p>
-      <div className="flex flex-wrap gap-2">
-        {sizeOptions.map((option) => (
-          <span key={option.id ?? option.size} className="rounded-full border border-black/10 px-3 py-1 text-xs font-semibold">
-            {option.size ?? "Size"} · {formatDirham(option.priceAED)}
-          </span>
+      <div className="flex flex-wrap items-center gap-3 text-sm font-semibold text-black/70">
+        {sizeOptions.map((option, index) => (
+          <div key={option.id ?? option.size} className="flex items-center gap-2">
+            {index > 0 ? <span className="text-black/30">|</span> : null}
+            <span>{option.size ?? "Size"}</span>
+            {typeof option.priceAED === "number" ? <span className="text-xs text-black/50">{formatDirham(option.priceAED)}</span> : null}
+          </div>
         ))}
       </div>
     </div>
@@ -804,7 +876,7 @@ function HeaderBar({ cartIndicator, subtitle, showBack }: { cartIndicator?: Cart
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex items-center gap-3">
         {showBack ? (
-          <span className="rounded-full bg-black/5 px-3 py-1 text-xs font-semibold text-black/60">←</span>
+          <span className="inline-flex items-center rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black/60">? All Items</span>
         ) : (
           <div className="rounded-full bg-[color:var(--icecream-primary)]/15 px-3 py-1 text-sm font-semibold text-[color:var(--icecream-primary)]">BR</div>
         )}
@@ -821,7 +893,6 @@ function HeaderBar({ cartIndicator, subtitle, showBack }: { cartIndicator?: Cart
     </div>
   );
 }
-
 function OverlaySectionHeader({ title, subtitle, showBack }: { title: string; subtitle?: string | null; showBack?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
@@ -829,11 +900,10 @@ function OverlaySectionHeader({ title, subtitle, showBack }: { title: string; su
         <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{subtitle ?? "On screen"}</p>
         <h3 className="text-xl font-semibold">{title}</h3>
       </div>
-      {showBack ? <span className="rounded-full bg-black/5 px-3 py-1 text-xs font-semibold text-black/60">← Back</span> : null}
+      {showBack ? <span className="inline-flex items-center rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black/60">? Back</span> : null}
     </div>
   );
 }
-
 function FilterBadge({ label }: { label: string }) {
   return <span className="rounded-full bg-black/5 px-3 py-1 text-black/60">{label}</span>;
 }
@@ -905,28 +975,30 @@ function ToppingPriceGroup({ title, items, selectedIds }: { title: string; items
   return (
     <div className="space-y-2">
       <p className="text-sm font-semibold">{title}</p>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-2">
         {items.map((item) => {
           const selected = selectedIds.has(item.id ?? "");
           return (
             <article
               key={item.id ?? item.name}
               className={clsx(
-                "rounded-2xl border px-3 py-4 text-center",
-                selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)]/5" : "border-black/5"
+                "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all",
+                selected && "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
               )}
             >
-              <CardImage src={item.imageUrl} alt={item.name} className="h-28 bg-white" contain />
-              <p className="mt-2 text-sm font-semibold">{item.name}</p>
-              <p className="text-xs text-black/60">{formatDirham(item.priceAED)}</p>
+              <CardImage src={item.imageUrl} alt={item.name} className="h-32 bg-white" contain />
+              <div className="mt-3 space-y-1">
+                <p className="text-base font-semibold text-[color:var(--icecream-dark)]">{item.name}</p>
+                <p className="text-sm text-black/60">{formatDirham(item.priceAED)}</p>
+              </div>
               <button
                 type="button"
                 className={clsx(
-                  "mt-2 inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-semibold",
-                  selected ? "bg-[color:var(--icecream-primary)] text-white" : "bg-black/10 text-black/70"
+                  "mt-4 inline-flex w-full items-center justify-center rounded-full border px-4 py-2 text-sm font-semibold",
+                  selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-white" : "border-black/10 bg-white text-black/70"
                 )}
               >
-                {selected ? "Selected" : "Select"}
+                {selected ? "Selected ✓" : "Select"}
               </button>
             </article>
           );
