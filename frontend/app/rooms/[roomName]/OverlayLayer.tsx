@@ -3,6 +3,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useMemo, useState } from "react";
+import type { ReceivedDataMessage } from "@livekit/components-core";
 import { useDataChannel } from "@livekit/components-react";
 import clsx from "clsx";
 
@@ -290,7 +291,7 @@ export function OverlayLayer() {
   useDataChannel(
     OVERLAY_TOPIC,
     useCallback(
-      (msg) => {
+      (msg: ReceivedDataMessage<typeof OVERLAY_TOPIC>) => {
         if (msg?.payload) {
           handleOverlayPacket(msg.payload);
         }
