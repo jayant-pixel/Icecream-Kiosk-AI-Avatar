@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "cross-env NEXT_DISABLE_TURBOPACK=1 next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
@@ -37,6 +37,7 @@
     "@types/node": "^22.9.0",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.1.2",
+    "cross-env": "^7.0.3",
     "eslint": "^9.25.0",
     "eslint-config-next": "^16.0.0",
     "source-map-loader": "^5.0.0",

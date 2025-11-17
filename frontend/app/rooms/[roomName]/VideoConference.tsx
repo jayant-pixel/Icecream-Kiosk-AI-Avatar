@@ -10,7 +10,6 @@ import { Track } from "livekit-client";
 import * as React from "react";
 import { ControlBar } from "./ControlBar";
 import { OverlayLayer } from "./OverlayLayer";
-import { ProductShowcase } from "./ProductShowcase";
 
 export function VideoConference({
   ...props
@@ -60,9 +59,8 @@ export function VideoConference({
             </div>
           </div>
         )}
-        <div className="pointer-events-none absolute inset-0 flex w-full flex-col items-center justify-center gap-6 px-4">
-          <ProductShowcase className="max-w-6xl" />
-          <div className="pointer-events-auto w-full max-w-2xl">
+        <div className="pointer-events-none absolute inset-0 flex w-full items-center justify-center px-4">
+          <div className="pointer-events-auto w-full max-w-4xl">
             <OverlayLayer />
           </div>
         </div>

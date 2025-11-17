@@ -9,8 +9,7 @@ type ProductCard = {
   productId?: string;
   name?: string;
   description?: string;
-  priceCents?: number | null;
-  priceDollars?: number | null;
+  priceAED?: number | null;
   imageUrl?: string | null;
   displayName?: string[] | string;
   category?: string | null;
@@ -43,12 +42,23 @@ type ToastState = {
   expiresAt: number;
 };
 
-const formatPrice = (cents?: number | null, dollars?: number | null) => {
+const formatPrice = ({
+  aed,
+  dollars,
+  cents,
+}: {
+  aed?: number | null;
+  dollars?: number | null;
+  cents?: number | null;
+} = {}) => {
+  if (typeof aed === "number") {
+    return `AED ${aed.toFixed(2)}`;
+  }
   if (typeof dollars === "number") {
-    return `$${dollars.toFixed(2)}`;
+    return `AED ${dollars.toFixed(2)}`;
   }
   if (typeof cents === "number") {
-    return `$${(cents / 100).toFixed(2)}`;
+    return `AED ${(cents / 100).toFixed(2)}`;
   }
   return "";
 };
@@ -220,9 +230,9 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
       }
     };
 
-    room.localParticipant.registerRpcMethod("client.products", handleProductRpc);
+    room.registerRpcMethod("client.products", handleProductRpc);
     return () => {
-      room.localParticipant.unregisterRpcMethod("client.products");
+      room.unregisterRpcMethod("client.products");
     };
   }, [room]);
 
@@ -252,9 +262,9 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
       }
     };
 
-    room.localParticipant.registerRpcMethod("client.directions", handleDirectionsRpc);
+    room.registerRpcMethod("client.directions", handleDirectionsRpc);
     return () => {
-      room.localParticipant.unregisterRpcMethod("client.directions");
+      room.unregisterRpcMethod("client.directions");
     };
   }, [room]);
 
@@ -350,17 +360,18 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
 
   const resolveSummaryValue = (base: "subtotal" | "tax" | "total") => {
     if (!summary) return "--";
+    const aedKey = `${base}AED` as const;
     const dollarsKey = `${base}Dollars` as const;
     const centsKey = `${base}Cents` as const;
-    const dollarsValue = summary[dollarsKey] as number | undefined;
-    if (typeof dollarsValue === "number") {
-      return formatPrice(null, dollarsValue);
-    }
-    const centsValue = summary[centsKey] as number | undefined;
-    if (typeof centsValue === "number") {
-      return formatPrice(centsValue, null);
-    }
-    return "--";
+    const aedValue = summary[aedKey];
+    const dollarsValue = summary[dollarsKey];
+    const centsValue = summary[centsKey];
+    const formatted = formatPrice({
+      aed: typeof aedValue === "number" ? (aedValue as number) : undefined,
+      dollars: typeof dollarsValue === "number" ? (dollarsValue as number) : undefined,
+      cents: typeof centsValue === "number" ? (centsValue as number) : undefined,
+    });
+    return formatted || "--";
   };
 
   const summaryMessage = typeof summary?.["message"] === "string" ? (summary?.["message"] as string) : null;
@@ -373,18 +384,20 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
     if (mode === "detail") {
       return (
         <div className="space-y-4">
-          {primaryCard.imageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={primaryCard.imageUrl}
-              alt={primaryCard.name ?? "Menu item"}
-              className="h-56 w-full rounded-2xl object-cover"
-            />
-          ) : (
-            <div className="flex h-56 w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
-              Scoop
-            </div>
-          )}
+          <div className="flex h-48 w-full items-center justify-center rounded-2xl bg-white">
+            {primaryCard.imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={primaryCard.imageUrl}
+                alt={primaryCard.name ?? "Menu item"}
+                className="h-full w-full rounded-2xl object-contain p-2"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                Scoop
+              </div>
+            )}
+          </div>
           <div className="space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -396,7 +409,9 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
                 </h3>
               </div>
               <span className="text-lg font-semibold text-[color:var(--icecream-primary)]">
-                {formatPrice(primaryCard.priceCents, primaryCard.priceDollars)}
+                {formatPrice({
+                  aed: primaryCard.priceAED,
+                })}
               </span>
             </div>
             {primaryCard.description ? (
@@ -441,18 +456,20 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
 
       return (
         <div className="space-y-4">
-          {primaryCard.imageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={primaryCard.imageUrl}
-              alt={primaryCard.name ?? "Menu item"}
-              className="h-52 w-full rounded-2xl object-cover"
-            />
-          ) : (
-            <div className="flex h-52 w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
-              Scoop
-            </div>
-          )}
+          <div className="flex h-40 w-full items-center justify-center rounded-2xl bg-white">
+            {primaryCard.imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={primaryCard.imageUrl}
+                alt={primaryCard.name ?? "Menu item"}
+                className="h-full w-full rounded-2xl object-contain p-2"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                Scoop
+              </div>
+            )}
+          </div>
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
               Added to your tray
@@ -470,7 +487,7 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
                   {totalItems} item{totalItems === 1 ? "" : "s"}
                 </span>
               </div>
-              <div className="flex flex-wrap gap-3">
+              <div className="flex max-h-48 flex-wrap gap-3 overflow-y-auto pr-1">
                 {cartItems.map(({ key, card, qty }) => {
                   const label = card.name ?? "Treat";
                   return (
@@ -481,7 +498,7 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
                       <div className="relative h-20 w-full overflow-hidden rounded-xl">
                         {card.imageUrl ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={card.imageUrl} alt={label} className="h-full w-full object-cover" />
+                          <img src={card.imageUrl} alt={label} className="h-full w-full object-contain p-1" />
                         ) : (
                           <div className="flex h-full w-full items-center justify-center rounded-xl bg-[color:var(--icecream-primary)]/10 text-xs font-semibold text-[color:var(--icecream-primary)]">
                             Scoop
@@ -493,7 +510,9 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
                       </div>
                       <p className="line-clamp-2 text-xs font-medium text-[color:var(--icecream-dark)]">{label}</p>
                       <p className="text-[11px] text-black/50">
-                        {formatPrice(card.priceCents ?? undefined, card.priceDollars ?? undefined)}
+                        {formatPrice({
+                          aed: card.priceAED ?? undefined,
+                        })}
                       </p>
                     </div>
                   );
@@ -586,18 +605,20 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
                       key={item.id ?? item.productId ?? item.name}
                       className="flex h-full flex-col rounded-3xl border border-black/5 bg-white/90 p-4 shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
                     >
-                      {item.imageUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={item.imageUrl}
-                          alt={item.name ?? "Menu item"}
-                          className="h-40 w-full rounded-2xl object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-40 w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
-                          Scoop
-                        </div>
-                      )}
+                      <div className="flex h-40 w-full items-center justify-center rounded-2xl bg-white">
+                        {item.imageUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={item.imageUrl}
+                            alt={item.name ?? "Menu item"}
+                            className="h-full w-full rounded-2xl object-contain p-2"
+                          />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                            Scoop
+                          </div>
+                        )}
+                      </div>
                       <div className="mt-4 flex flex-1 flex-col">
                         <h4 className="text-base font-semibold text-[color:var(--icecream-dark)]">
                           {item.name ?? "Treat"}
@@ -606,9 +627,11 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
                           <p className="mt-2 text-sm leading-snug text-black/60 line-clamp-3">{item.description}</p>
                         ) : null}
                         <div className="mt-auto flex items-center justify-between pt-4">
-                          <span className="text-sm font-semibold text-[color:var(--icecream-primary)]">
-                            {formatPrice(item.priceCents, item.priceDollars)}
-                          </span>
+                      <span className="text-sm font-semibold text-[color:var(--icecream-primary)]">
+                        {formatPrice({
+                          aed: item.priceAED,
+                        })}
+                      </span>
                           <button
                             type="button"
                             disabled={!agent}
@@ -638,8 +661,8 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
 
   const detailCard = detailPanelContent ? (
     <div className="flex w-full justify-center lg:justify-end">
-      <div className="pointer-events-auto w-full max-w-md px-4 pb-6 lg:fixed lg:right-8 lg:top-1/2 lg:w-auto lg:max-w-sm lg:-translate-y-1/2 lg:px-0 lg:pb-0 lg:z-30">
-        <div className="rounded-[28px] border border-white/40 bg-white/95 p-6 shadow-2xl backdrop-blur-xl text-[color:var(--icecream-dark)]">
+      <div className="pointer-events-auto w-full max-w-md px-4 pb-4 lg:fixed lg:right-8 lg:top-1/2 lg:w-auto lg:max-w-sm lg:-translate-y-1/2 lg:px-0 lg:pb-0 lg:z-30">
+        <div className="max-h-[85vh] overflow-y-auto rounded-[28px] border border-white/40 bg-white/95 p-6 shadow-2xl backdrop-blur-xl text-[color:var(--icecream-dark)]">
           {detailPanelContent}
         </div>
       </div>
@@ -684,7 +707,9 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
                 Added {toast.qty} x {toast.product.name ?? "treat"}
               </p>
               <p className="text-xs opacity-80">
-                {formatPrice(toast.product.priceCents ?? undefined, toast.product.priceDollars ?? undefined)}
+                {formatPrice({
+                  aed: toast.product.priceAED ?? undefined,
+                })}
               </p>
             </div>
           </div>
