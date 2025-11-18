@@ -86,7 +86,7 @@ Optional: Docker for containerizing the worker.
    LIVEKIT_URL=wss://<your-project>.livekit.cloud
    LIVEKIT_API_KEY=lk_...
    LIVEKIT_API_SECRET=...
-   LIVEKIT_AGENT_NAME=scoop-avatar
+   LIVEKIT_AGENT_NAME=baskin-avatar
 
    OPENAI_API_KEY=...
    OPENAI_REALTIME_MODEL=gpt-realtime-mini-2025-10-06
@@ -233,7 +233,7 @@ The repo ships with `agents/Dockerfile` and `agents/livekit.toml` configured for
    - `LIVEKIT_URL`
    - `LIVEKIT_API_KEY`
    - `LIVEKIT_API_SECRET`
-   - `NEXT_PUBLIC_AGENT_NAME=scoop-avatar`
+   - `NEXT_PUBLIC_AGENT_NAME=baskin-avatar`
    - `NEXT_PUBLIC_CONN_DETAILS_ENDPOINT=/api/livekit/connection-details`
    - `NEXT_PUBLIC_SHOW_SETTINGS_MENU=false`
    - `NEXT_PUBLIC_LK_RECORD_ENDPOINT=/api/livekit/record`

@@ -27,7 +27,7 @@ Create `agents/.env` with the following variables:
 | --- | --- |
 | `LIVEKIT_URL` | LiveKit host (e.g. `wss://your-host.livekit.cloud`) |
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | API credentials with room access |
-| `LIVEKIT_AGENT_NAME` | Agent display name (defaults to `scoop-avatar`) |
+| `LIVEKIT_AGENT_NAME` | Agent display name (defaults to `baskin-avatar`) |
 | `OPENAI_API_KEY` | Realtime API key |
 | `OPENAI_REALTIME_MODEL` | Realtime model id (defaults to `gpt-realtime-mini-2025-10-06`) |
 | `OPENAI_REALTIME_VOICE` | Voice id (`coral` by default) |
@@ -112,4 +112,3 @@ as the worker.
    ```
 
 Update the branch name as appropriate for your workflow.
-

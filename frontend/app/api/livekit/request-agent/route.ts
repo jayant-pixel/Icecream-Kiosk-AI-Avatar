@@ -28,7 +28,10 @@ export async function POST(request: NextRequest) {
     }
 
     const roomName = room;
-    const agentName = process.env.NEXT_PUBLIC_AGENT_NAME || "livekit-agent";
+    const agentName =
+      process.env.NEXT_PUBLIC_AGENT_NAME ||
+      process.env.LIVEKIT_AGENT_NAME ||
+      "baskin-avatar";
 
     const agentDispatchClient = new AgentDispatchClient(
       LIVEKIT_URL,

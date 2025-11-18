@@ -111,9 +111,26 @@ type ToppingOverlayPayload = {
   toppings?: ToppingCatalogCard[];
 };
 
-type CartFlavor = { id?: string; name?: string };
+type CartFlavor = {
+  id?: string;
+  name?: string;
+  imageUrl?: string | null;
+  isExtra?: boolean;
+  unitPriceAED?: number | null;
+  qty?: number | null;
+  linePriceAED?: number | null;
+};
 
-type CartTopping = { id?: string; name?: string; isFree?: boolean; priceAED?: number | null };
+type CartTopping = {
+  id?: string;
+  name?: string;
+  isFree?: boolean;
+  priceAED?: number | null;
+  imageUrl?: string | null;
+  unitPriceAED?: number | null;
+  qty?: number | null;
+  linePriceAED?: number | null;
+};
 
 type CartItem = {
   lineId?: string;
@@ -333,56 +350,62 @@ export function OverlayLayer() {
       return null;
     }
     return (
-      <div className={clsx("w-full rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl", widthClass)}>
-        {content}
+      <div
+        className={clsx(
+          "w-full shrink-0 overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl",
+          "max-h-[calc(100vh-5rem)]",
+          widthClass
+        )}
+      >
+        <div className="h-full overflow-y-auto pr-1">{content}</div>
       </div>
     );
   }, []);
 
   let overlayBody: ReactNode = null;
-  const containerClass = "w-full max-w-[1400px] px-[5vw]";
+  const containerClass = "w-full h-full px-1 sm:px-2 lg:px-6";
 
   if (activeLayer === "cart" && cartPayload?.cart) {
     overlayBody = (
-      <div className={clsx(containerClass, "ml-auto flex justify-end")}>
+      <div className={clsx(containerClass, "flex justify-start")}>
         {renderCard(<CartOverlay payload={cartPayload.cart} />, "max-w-[420px]")}
       </div>
     );
   } else if (activeLayer === "directions" && directionsPayload) {
     overlayBody = (
-      <div className={clsx(containerClass, "ml-auto flex justify-end")}>
+      <div className={clsx(containerClass, "flex justify-start")}>
         {renderCard(<DirectionsOverlay payload={directionsPayload} />, "max-w-[420px]")}
       </div>
     );
   } else if (panelContent && detailElement) {
     overlayBody = (
-      <div className={clsx(containerClass, "mx-auto flex items-start justify-between gap-6")}>
-        {renderCard(detailElement, "max-w-[580px]")}
+      <div className={clsx(containerClass, "flex items-start justify-between gap-6")}>
         {renderCard(panelContent, "max-w-[360px]")}
+        {renderCard(detailElement, "max-w-[520px]")}
       </div>
     );
   } else if (showMenuColumn && detailElement && menuCache) {
     overlayBody = (
-      <div className={clsx(containerClass, "mx-auto flex items-start justify-between gap-6")}>
-        {renderCard(<ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />, "max-w-[600px]")}
-        {renderCard(detailElement, "max-w-[580px]")}
+      <div className={clsx(containerClass, "flex items-start justify-between gap-6")}>
+        {renderCard(detailElement, "max-w-[520px]")}
+        {renderCard(<ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />, "max-w-[520px]")}
       </div>
     );
   } else if (detailElement) {
     overlayBody = (
-      <div className={clsx(containerClass, "flex justify-start")}>
-        {renderCard(detailElement, "max-w-[580px]")}
+      <div className={clsx(containerClass, "flex justify-end")}>
+        {renderCard(detailElement, "max-w-[520px]")}
       </div>
     );
   } else if (gridElement) {
     overlayBody = (
-      <div className={clsx(containerClass, "flex justify-start")}>
-        {renderCard(gridElement, "max-w-[640px]")}
+      <div className={clsx(containerClass, "flex justify-end")}>
+        {renderCard(gridElement, "max-w-[520px]")}
       </div>
     );
   } else if (panelContent) {
     overlayBody = (
-      <div className={clsx(containerClass, "ml-auto flex justify-end")}>
+      <div className={clsx(containerClass, "flex justify-start")}>
         {renderCard(panelContent, "max-w-[360px]")}
       </div>
     );
@@ -393,8 +416,8 @@ export function OverlayLayer() {
   }
 
   return (
-    <div className="pointer-events-none absolute inset-0 flex items-start justify-center px-4 py-8 sm:px-6">
-      <div className="pointer-events-auto w-full">{overlayBody}</div>
+    <div className="pointer-events-none absolute inset-0 px-1 py-6 sm:px-2 lg:px-6">
+      <div className="pointer-events-auto h-full w-full">{overlayBody}</div>
     </div>
   );
 }
@@ -429,7 +452,7 @@ function ProductGridOverlay({
             key={category}
             className={clsx(
               "cursor-default rounded-full px-3 py-1",
-              (payload.category ?? "All") === category ? "bg-[color:var(--icecream-primary)] text-white" : "bg-black/5 text-black/60"
+              (payload.category ?? "All") === category ? "bg-[color:var(--icecream-primary)] text-black" : "bg-black/5 text-black/60"
             )}
           >
             {category}
@@ -456,12 +479,6 @@ function ProductGridOverlay({
                   <p className="text-xs uppercase tracking-wide text-black/45">{product.category ?? "Menu"}</p>
                   <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(product.priceAED)}</p>
                 </div>
-                <button
-                  type="button"
-                  className="mt-3 inline-flex items-center justify-center rounded-full border border-[color:var(--icecream-primary)] px-3 py-1 text-xs font-semibold text-[color:var(--icecream-primary)]"
-                >
-                  View Details
-                </button>
               </article>
             ))}
           </div>
@@ -506,7 +523,7 @@ function ProductDetailOverlay({
           <div className="flex-1 space-y-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{product?.category}</p>
-              <h2 className="text-2xl font-semibold">{product?.name ?? "Treat"}</h2>
+              <h2 className="text-2xl font-semibold text-black">{product?.name ?? "Treat"}</h2>
               <p className="text-sm text-black/60">
                 Size: {product?.size ?? "-"}
                 {typeof product?.scoops === "number" ? ` · ${product?.scoops} scoop${product?.scoops === 1 ? "" : "s"}` : null}
@@ -528,7 +545,7 @@ function ProductDetailOverlay({
             <div className="flex items-center gap-3 text-sm font-semibold">
               Quantity:
               <QuantityBadge />
-              <button type="button" className="rounded-full bg-[color:var(--icecream-primary)] px-4 py-2 text-sm font-semibold text-white">
+              <button type="button" className="rounded-full bg-[color:var(--icecream-primary)] px-4 py-2 text-sm font-semibold text-black">
                 Add to Cart
               </button>
             </div>
@@ -575,7 +592,7 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
             key={tab}
             className={clsx(
               "rounded-full px-3 py-1",
-              tab === "All" ? "bg-[color:var(--icecream-primary)] text-white" : "bg-black/5 text-black/50"
+              tab === "All" ? "bg-[color:var(--icecream-primary)] text-black" : "bg-black/5 text-black/50"
             )}
           >
             {tab}
@@ -603,7 +620,7 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
                   type="button"
                   className={clsx(
                     "mt-4 inline-flex w-full items-center justify-center rounded-full border px-4 py-2 text-sm font-semibold",
-                    selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-white" : "border-black/10 bg-white text-black/70"
+                    selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-black" : "border-black/10 bg-white text-black/70"
                   )}
                 >
                   {selected ? "Selected ✓" : "Select"}
@@ -671,14 +688,17 @@ function ToppingsOverlay({ payload }: { payload: ToppingOverlayPayload }) {
 function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["cart"]> }) {
   const items = payload.items ?? [];
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 text-[color:var(--icecream-dark)]">
       <OverlaySectionHeader title="Your Cart" subtitle="Everything ready for pickup" showBack />
       {items.length === 0 ? (
         <div className="rounded-3xl bg-white/90 p-6 text-center text-sm text-black/60">Cart is empty for now.</div>
       ) : (
         <div className="space-y-3">
-          {items.map((item) => (
-            <article key={item.lineId ?? item.product_id ?? item.name} className="space-y-3 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm">
+          {items.map((item) => {
+            const qty = item.qty ?? 1;
+            const unitTotal = qty ? (item.lineTotalAED ?? 0) / qty : item.lineTotalAED ?? 0;
+            return (
+              <article key={item.lineId ?? item.product_id ?? item.name} className="space-y-3 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm">
               <div className="flex gap-3">
                 <div className="h-20 w-20 shrink-0">
                   <CardImage src={item.imageUrl} alt={item.name} className="h-20 w-20" contain />
@@ -690,51 +710,33 @@ function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["car
                     {item.category ? ` (${item.category})` : ""}
                   </p>
                   {item.display ? <p className="text-xs text-black/50">Pickup: {item.display}</p> : null}
-                  <div className="flex flex-wrap gap-3 text-[11px] text-black/60">
+                  <div className="flex flex-wrap gap-3 text-[11px] text-black/70">
                     <span>Base {formatDirham(item.basePriceAED)}</span>
-                    {item.flavorExtrasAED ? <span>Flavors +{formatDirham(item.flavorExtrasAED)}</span> : null}
-                    {item.toppingExtrasAED ? <span>Toppings +{formatDirham(item.toppingExtrasAED)}</span> : null}
+                    {item.flavorExtrasAED ? <span>Flavor add-ons +{formatDirham(item.flavorExtrasAED)}</span> : null}
+                    {item.toppingExtrasAED ? <span>Topping add-ons +{formatDirham(item.toppingExtrasAED)}</span> : null}
                   </div>
                 </div>
               </div>
-              {item.flavors?.length ? (
-                <div className="flex flex-wrap gap-2">
-                  {item.flavors.map((flavor) => (
-                    <span key={flavor.id ?? flavor.name} className="rounded-full bg-black/5 px-3 py-1 text-xs">
-                      {flavor.name}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-xs text-black/50">No flavors selected.</p>
-              )}
-              {item.toppings?.length ? (
-                <div className="flex flex-wrap gap-2">
-                  {item.toppings.map((topping) => (
-                    <span
-                      key={topping.id ?? topping.name}
-                      className={clsx(
-                        "rounded-full px-3 py-1 text-xs",
-                        topping.isFree ? "bg-black/5 text-black/70" : "bg-[color:var(--icecream-primary)]/10 text-[color:var(--icecream-primary)]"
-                      )}
-                    >
-                      {topping.name}
-                      {topping.isFree ? "" : ` (+${formatDirham(topping.priceAED)})`}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-xs text-black/50">No toppings added.</p>
-              )}
+              <CartFlavorList flavors={item.flavors} />
+              <CartToppingList toppings={item.toppings} />
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-xs text-black/60">
-                  Qty:
-                  <QuantityBadge value={item.qty ?? 1} />
+                <div className="space-y-1 text-xs text-black/60">
+                  <div className="flex items-center gap-2">
+                    Qty:
+                    <QuantityBadge value={qty} />
+                  </div>
+                  <p>
+                    Per treat: <span className="font-semibold text-black/80">{formatDirham(unitTotal)}</span>
+                  </p>
                 </div>
-                <div className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(item.lineTotalAED)}</div>
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(item.lineTotalAED)}</p>
+                  <p className="text-[11px] text-black/50">Line total</p>
+                </div>
               </div>
             </article>
-          ))}
+          );
+          })}
         </div>
       )}
       <div className="space-y-1 rounded-3xl bg-black/5 px-4 py-3 text-sm text-black/70">
@@ -881,7 +883,7 @@ function HeaderBar({ cartIndicator, subtitle, showBack }: { cartIndicator?: Cart
           <div className="rounded-full bg-[color:var(--icecream-primary)]/15 px-3 py-1 text-sm font-semibold text-[color:var(--icecream-primary)]">BR</div>
         )}
         <div>
-          <p className="text-base font-semibold">Baskin Robbins Al Quoz</p>
+          <p className="text-base font-semibold text-[color:var(--icecream-dark)]">Baskin Robbins Al Quoz</p>
           {subtitle ? <p className="text-xs text-black/60">{subtitle}</p> : null}
         </div>
       </div>
@@ -898,7 +900,7 @@ function OverlaySectionHeader({ title, subtitle, showBack }: { title: string; su
     <div className="flex items-start justify-between gap-4">
       <div>
         <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{subtitle ?? "On screen"}</p>
-        <h3 className="text-xl font-semibold">{title}</h3>
+        <h3 className="text-xl font-semibold text-[color:var(--icecream-dark)]">{title}</h3>
       </div>
       {showBack ? <span className="inline-flex items-center rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black/60">? Back</span> : null}
     </div>
@@ -914,7 +916,7 @@ function ActionPill({ label, minimal }: { label: string; minimal?: boolean }) {
       type="button"
       className={clsx(
         "rounded-full px-3 py-1",
-        minimal ? "border border-black/10 text-black/60" : "bg-[color:var(--icecream-primary)] text-white"
+        minimal ? "border border-black/10 text-black/60" : "bg-[color:var(--icecream-primary)] text-black"
       )}
     >
       {label}
@@ -995,7 +997,7 @@ function ToppingPriceGroup({ title, items, selectedIds }: { title: string; items
                 type="button"
                 className={clsx(
                   "mt-4 inline-flex w-full items-center justify-center rounded-full border px-4 py-2 text-sm font-semibold",
-                  selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-white" : "border-black/10 bg-white text-black/70"
+                  selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-black" : "border-black/10 bg-white text-black/70"
                 )}
               >
                 {selected ? "Selected ✓" : "Select"}
@@ -1004,6 +1006,83 @@ function ToppingPriceGroup({ title, items, selectedIds }: { title: string; items
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function CartFlavorList({ flavors }: { flavors?: CartFlavor[] }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">Flavors</p>
+      {flavors?.length ? (
+        <div className="space-y-2">
+          {flavors.map((flavor) => (
+            <CartSelectionRow
+              key={flavor.id ?? flavor.name}
+              image={flavor.imageUrl}
+              name={flavor.name}
+              descriptor={flavor.isExtra ? "Extra flavor" : "Included"}
+              qty={flavor.qty}
+              price={resolveLinePrice(flavor)}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-black/50">No flavors selected.</p>
+      )}
+    </div>
+  );
+}
+
+function CartToppingList({ toppings }: { toppings?: CartTopping[] }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">Toppings</p>
+      {toppings?.length ? (
+        <div className="space-y-2">
+          {toppings.map((topping) => (
+            <CartSelectionRow
+              key={topping.id ?? topping.name}
+              image={topping.imageUrl}
+              name={topping.name}
+              descriptor={topping.isFree ? "Included" : "Charged add-on"}
+              qty={topping.qty}
+              price={resolveLinePrice(topping)}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-black/50">No toppings added.</p>
+      )}
+    </div>
+  );
+}
+
+function CartSelectionRow({
+  image,
+  name,
+  descriptor,
+  qty,
+  price,
+}: {
+  image?: string | null;
+  name?: string;
+  descriptor: string;
+  qty?: number | null;
+  price?: number | null;
+}) {
+  return (
+    <div className="flex items-center gap-3 rounded-2xl bg-black/5 p-2">
+      <div className="h-12 w-12 shrink-0">
+        <CardImage src={image} alt={name} className="h-12 w-12 bg-white" contain />
+      </div>
+      <div className="flex-1">
+        <p className="text-sm font-semibold text-black/80">{name ?? "Selection"}</p>
+        <p className="text-xs text-black/60">
+          Qty {qty ?? 1} · {descriptor}
+        </p>
+      </div>
+      <div className="text-sm font-semibold text-black/80">{formatDirham(price ?? 0)}</div>
     </div>
   );
 }
@@ -1031,6 +1110,18 @@ function buildScoopsDots(free: number, selected: number) {
   return Array.from({ length: total }).map((_, index) => (
     <span key={`scoop-${index}`} className={clsx("inline-block h-3 w-3 rounded-full", index < selected ? "bg-[color:var(--icecream-primary)]" : "bg-black/20")}></span>
   ));
+}
+
+function resolveLinePrice(entry?: { linePriceAED?: number | null; unitPriceAED?: number | null; qty?: number | null }) {
+  if (!entry) {
+    return 0;
+  }
+  if (typeof entry.linePriceAED === "number") {
+    return entry.linePriceAED;
+  }
+  const qty = entry.qty ?? 1;
+  const unit = entry.unitPriceAED ?? 0;
+  return unit * qty;
 }
 
 function formatDirham(value?: number | null) {

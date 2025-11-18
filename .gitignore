@@ -12,7 +12,6 @@ frontend/.env.local
 .venv/
 **/__pycache__/
 *.py[cod]
-
 agents/.env
 agents/.venv/
 agents/__pycache__/
@@ -22,7 +21,7 @@ agents/__pycache__/
 .idea/
 *.log
 coverage/
-
+frontend/.git.bak/
 reference repo examples/
 
 # docs pulled from LiveKit site

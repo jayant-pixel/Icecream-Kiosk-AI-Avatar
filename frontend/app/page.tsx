@@ -41,8 +41,8 @@ export default function Page() {
   };
 
   return (
-    <main className="icecream-hero">
-      <div className="space-y-4 max-w-3xl">
+    <main className="icecream-hero" suppressHydrationWarning>
+      <div className="space-y-4 max-w-3xl" suppressHydrationWarning>
         <h1 className="text-4xl md:text-6xl font-extrabold leading-tight drop-shadow-lg">
           Meet Your Personal Ice Cream Concierge!
         </h1>
@@ -50,7 +50,7 @@ export default function Page() {
           Discover your perfect scoop with Scoop, your AI tasting guide.
         </p>
       </div>
-      <div className="mt-10 flex flex-col items-center gap-4">
+      <div className="mt-10 flex flex-col items-center gap-4" suppressHydrationWarning>
         <button
           type="button"
           onClick={handleStart}

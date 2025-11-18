@@ -59,11 +59,7 @@ export function VideoConference({
             </div>
           </div>
         )}
-        <div className="pointer-events-none absolute inset-0 flex w-full items-center justify-center px-4">
-          <div className="pointer-events-auto w-full max-w-4xl">
-            <OverlayLayer />
-          </div>
-        </div>
+        <OverlayLayer />
       </div>
       <div className="absolute inset-x-0 bottom-0 flex justify-center px-4 pb-6 sm:pb-10 pointer-events-none">
         <div className="pointer-events-auto">

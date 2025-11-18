@@ -7,7 +7,10 @@ import {
 export async function DELETE(request: NextRequest) {
   try {
     const roomName = request.nextUrl.searchParams.get("room-name");
-    const agentName = process.env.NEXT_PUBLIC_AGENT_NAME || "livekit-agent";
+    const agentName =
+      process.env.NEXT_PUBLIC_AGENT_NAME ||
+      process.env.LIVEKIT_AGENT_NAME ||
+      "baskin-avatar";
 
     console.log("stopping agent...");
     console.log("roomName:", roomName);
