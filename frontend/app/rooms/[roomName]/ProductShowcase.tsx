@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRoomContext, useVoiceAssistant } from "@livekit/components-react";
 import clsx from "clsx";
+import type { RpcInvocationData } from "livekit-client";
 
 type ProductCard = {
   id?: string;
@@ -32,8 +33,14 @@ type ProductRpcPayload =
   | { action: "added"; product: ProductCard; qty?: number; summary?: Record<string, unknown> }
   | { action: "clear" };
 
+type DirectionEntry = {
+  displayName?: string;
+  hint?: string | null;
+  mapImage?: string | null;
+};
+
 type DirectionsPayload =
-  | { action: "show"; display?: string; directions?: any[] }
+  | { action: "show"; display?: string; directions?: DirectionEntry[] }
   | { action: "clear"; display?: string };
 
 type ToastState = {
@@ -110,7 +117,7 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
   useEffect(() => {
     if (!room) return;
 
-    const handleProductRpc = async (data: any): Promise<string> => {
+    const handleProductRpc = async (data: RpcInvocationData): Promise<string> => {
       try {
         const payloadRaw =
           typeof data?.payload === "string" ? data.payload : JSON.stringify(data?.payload ?? {});
@@ -239,7 +246,7 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
   useEffect(() => {
     if (!room) return;
 
-    const handleDirectionsRpc = async (data: any): Promise<string> => {
+    const handleDirectionsRpc = async (data: RpcInvocationData): Promise<string> => {
       try {
         const payloadRaw =
           typeof data?.payload === "string" ? data.payload : JSON.stringify(data?.payload ?? {});
@@ -270,11 +277,7 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
 
   useEffect(() => {
     if (!toast) return;
-    const remaining = toast.expiresAt - Date.now();
-    if (remaining <= 0) {
-      setToast(null);
-      return;
-    }
+    const remaining = Math.max(toast.expiresAt - Date.now(), 0);
     const timer = window.setTimeout(() => setToast(null), remaining);
     return () => window.clearTimeout(timer);
   }, [toast]);
@@ -330,28 +333,25 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
     return [{ label: "All", slug: "all" }, ...categories];
   }, [categories]);
 
-  useEffect(() => {
-    if (!categories.length) {
-      setActiveCategory("all");
-      return;
-    }
-    setActiveCategory((prev) => {
-      if (prev === "all") return prev;
-      const exists = categories.some((category) => category.slug === prev);
-      return exists ? prev : categories[0]?.slug ?? "all";
-    });
-  }, [categories]);
+  const normalizedCategory = useMemo(() => {
+    if (!categories.length) return "all";
+    if (activeCategory === "all") return "all";
+    const exists = categories.some((category) => category.slug === activeCategory);
+    return exists ? activeCategory : categories[0]?.slug ?? "all";
+  }, [activeCategory, categories]);
 
   const filteredMenuCards = useMemo(() => {
     if (!menuCards.length) return [];
-    if (activeCategory === "all") return menuCards;
-    return menuCards.filter((card) => slugifyCategory(getCategoryLabel(card)) === activeCategory);
-  }, [menuCards, activeCategory]);
+    if (normalizedCategory === "all") return menuCards;
+    return menuCards.filter(
+      (card) => slugifyCategory(getCategoryLabel(card)) === normalizedCategory
+    );
+  }, [menuCards, normalizedCategory]);
 
   const activeCategoryLabel =
-    activeCategory === "all"
+    normalizedCategory === "all"
       ? CATEGORY_FALLBACK
-      : categories.find((cat) => cat.slug === activeCategory)?.label ?? CATEGORY_FALLBACK;
+      : categories.find((cat) => cat.slug === normalizedCategory)?.label ?? CATEGORY_FALLBACK;
 
   const primaryCard = detail;
   const primaryCardKey = resolveProductKey(primaryCard);
@@ -539,7 +539,7 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
               </p>
             ) : null}
           </div>
-          <p className="text-xs text-black/60">Settle up at the counter whenever you're ready.</p>
+          <p className="text-xs text-black/60">Settle up at the counter whenever you&rsquo;re ready.</p>
           <button
             type="button"
             className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-[color:var(--icecream-dark)] px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:brightness-105"
@@ -559,7 +559,7 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
     }
     const isVertical = orientation === "vertical";
     return navCategories.map((category) => {
-      const isActive = activeCategory === category.slug;
+      const isActive = normalizedCategory === category.slug;
       return (
         <button
           key={category.slug}

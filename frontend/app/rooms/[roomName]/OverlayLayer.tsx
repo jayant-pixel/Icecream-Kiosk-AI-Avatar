@@ -446,11 +446,12 @@ export function OverlayLayer() {
 
   let overlayBody: ReactNode = null;
   const containerClass = "w-full h-full px-1 sm:px-2 lg:px-6";
+  const cartContent = cartPayload?.cart;
 
-  if (activeLayer === "cart" && cartPayload?.cart) {
+  if (activeLayer === "cart" && cartContent) {
     overlayBody = (
       <div className={clsx(containerClass, "flex justify-start")}>
-        {renderCard(<CartOverlay payload={cartPayload.cart} />, "max-w-[420px]")}
+        {renderCard(<CartOverlay payload={cartContent} />, "max-w-[420px]")}
       </div>
     );
   } else if (activeLayer === "directions" && directionsPayload) {
@@ -779,6 +780,10 @@ function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["car
           {items.map((item) => {
             const qty = item.qty ?? 1;
             const unitTotal = qty ? (item.lineTotalAED ?? 0) / qty : item.lineTotalAED ?? 0;
+            const productName = item.name ?? "";
+            const sizeLabel = item.size ?? "";
+            const showSize =
+              sizeLabel && !productName.toLowerCase().includes(sizeLabel.toLowerCase());
             return (
               <article key={item.lineId ?? item.product_id ?? item.name} className="space-y-3 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm">
               <div className="flex gap-3">
@@ -787,8 +792,8 @@ function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["car
                 </div>
                 <div className="flex-1 space-y-1">
                   <p className="text-base font-semibold">
-                    {item.name}
-                    {item.size ? ` — ${item.size}` : ""}
+                    {productName}
+                    {showSize ? ` - ${sizeLabel}` : ""}
                     {item.category ? ` (${item.category})` : ""}
                   </p>
                   {item.display ? <p className="text-xs text-black/50">Pickup: {item.display}</p> : null}
@@ -1040,7 +1045,10 @@ function SelectionSummary({
       <div className="flex flex-wrap gap-2">
         {items?.length ? (
           items.map((item) => (
-            <span key={item.id ?? item.name} className="rounded-full bg-black/5 px-3 py-1 text-xs">
+            <span
+              key={item.id ?? item.name}
+              className="rounded-full bg-[color:var(--icecream-primary)] px-3 py-1 text-xs font-medium text-white shadow-sm"
+            >
               {item.name}
             </span>
           ))

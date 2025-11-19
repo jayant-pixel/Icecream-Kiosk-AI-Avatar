@@ -20,10 +20,14 @@ export function VideoConferenceClientImpl(props: {
   token: string;
   codec: VideoCodec | undefined;
 }) {
-  const worker =
-    typeof window !== 'undefined' &&
-    new Worker(new URL('livekit-client/e2ee-worker', import.meta.url));
-  const keyProvider = new ExternalE2EEKeyProvider();
+  const worker = useMemo(
+    () =>
+      typeof window !== 'undefined'
+        ? new Worker(new URL('livekit-client/e2ee-worker', import.meta.url))
+        : undefined,
+    []
+  );
+  const keyProvider = useMemo(() => new ExternalE2EEKeyProvider(), []);
 
   const e2eePassphrase =
     typeof window !== 'undefined' ? decodePassphrase(window.location.hash.substring(1)) : undefined;
@@ -44,9 +48,9 @@ export function VideoConferenceClientImpl(props: {
           }
         : undefined,
     };
-  }, []);
+  }, [e2eeEnabled, keyProvider, props.codec, worker]);
 
-  const room = useMemo(() => new Room(roomOptions), []);
+  const room = useMemo(() => new Room(roomOptions), [roomOptions]);
   if (e2eeEnabled) {
     keyProvider.setKey(e2eePassphrase);
     room.setE2EEEnabled(true);

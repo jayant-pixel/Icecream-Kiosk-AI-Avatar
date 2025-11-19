@@ -12,7 +12,7 @@ export function RecordingIndicator() {
         window.alert('This meeting is being recorded');
       }
     }
-  }, [isRecording]);
+  }, [isRecording, wasRecording]);
 
   return (
     <div
