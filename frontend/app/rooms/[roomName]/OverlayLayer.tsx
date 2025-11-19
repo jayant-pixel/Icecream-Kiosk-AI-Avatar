@@ -292,7 +292,11 @@ export function OverlayLayer() {
         return firstItem.product_id;
       }
     }
-    if ("highlightedProductId" in payload && payload.highlightedProductId) {
+    if (
+      "highlightedProductId" in payload &&
+      typeof payload.highlightedProductId === "string" &&
+      payload.highlightedProductId.length > 0
+    ) {
       return payload.highlightedProductId;
     }
     return undefined;
