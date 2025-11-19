@@ -27,3 +27,6 @@ reference repo examples/
 # docs pulled from LiveKit site
 livekitcloudguide.md
 .lkpath
+frontend/.next/build-manifest.json
+frontend/.next/trace
+frontend/next-env.d.ts
