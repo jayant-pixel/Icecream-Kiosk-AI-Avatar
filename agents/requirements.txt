@@ -1,2 +1,2 @@
-livekit-agents[openai,silero,turn-detector,anam]>=1.2.15,<1.3.0
+livekit-agents[openai,silero,turn-detector,anam,cartesia]>=1.2.15,<1.3.0
 python-dotenv~=1.0
