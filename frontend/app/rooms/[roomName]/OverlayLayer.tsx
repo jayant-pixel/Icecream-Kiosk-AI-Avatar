@@ -4,7 +4,7 @@
 import type { ReactNode } from "react";
 import { useCallback, useMemo, useState } from "react";
 import type { ReceivedDataMessage } from "@livekit/components-core";
-import { useDataChannel } from "@livekit/components-react";
+import { useDataChannel, useRoomContext, useVoiceAssistant } from "@livekit/components-react";
 import clsx from "clsx";
 
 type ProductCard = {
@@ -27,6 +27,7 @@ type ProductGridPayload = {
   query?: string | null;
   products?: ProductCard[];
   cartSummary?: CartSummary;
+  overlayId?: string;
 };
 
 type ProductDetailPayload = {
@@ -41,6 +42,7 @@ type ProductDetailPayload = {
   sizeOptions?: SizeOption[];
   contextProductId?: string;
   cartSummary?: CartSummary;
+  overlayId?: string;
 };
 
 type FlavorSelection = {
@@ -89,6 +91,7 @@ type FlavorOverlayPayload = {
   usedFreeFlavors?: number;
   extraFlavorCount?: number;
   flavors?: FlavorCatalogCard[];
+  overlayId?: string;
 };
 
 type ToppingCatalogCard = {
@@ -109,6 +112,7 @@ type ToppingOverlayPayload = {
   selectedToppingIds?: string[];
   selectedToppings?: ToppingSelection[];
   toppings?: ToppingCatalogCard[];
+  overlayId?: string;
 };
 
 type CartFlavor = {
@@ -165,6 +169,7 @@ type CartOverlayPayload = {
     totalAED?: number | null;
     message?: string;
   };
+  overlayId?: string;
 };
 
 type DirectionLocation = {
@@ -177,6 +182,7 @@ type DirectionLocation = {
 type DirectionsOverlayPayload = {
   kind: "directions";
   locations?: DirectionLocation[];
+  overlayId?: string;
 };
 
 type UpgradeOverlayPayload = {
@@ -191,9 +197,10 @@ type UpgradeOverlayPayload = {
     primaryCtaLabel?: string;
     secondaryCtaLabel?: string;
   };
+  overlayId?: string;
 };
 
-type ClearOverlayPayload = { kind: "clear" };
+type ClearOverlayPayload = { kind: "clear"; overlayId?: string };
 
 type ProductsOverlayPayload = ProductGridPayload | ProductDetailPayload;
 
@@ -205,7 +212,7 @@ type OverlayPayload =
   | DirectionsOverlayPayload
   | UpgradeOverlayPayload
   | ClearOverlayPayload
-  | { kind: string };
+  | { kind: string; overlayId?: string };
 
 type OverlayLayerKind = "products" | "flavors" | "toppings" | "cart" | "directions";
 
@@ -216,6 +223,8 @@ const OVERLAY_TOPIC = "ui.overlay";
 const CATEGORY_OPTIONS = ["All", "Cups", "Sundae Cups", "Milk Shakes"];
 const FLAVOR_TABS = ["All", "Choco", "Berry", "Classics", "SugarLess"];
 export function OverlayLayer() {
+  const room = useRoomContext();
+  const { agent } = useVoiceAssistant();
   const [productPayload, setProductPayload] = useState<ProductsOverlayPayload | null>(null);
   const [flavorPayload, setFlavorPayload] = useState<FlavorOverlayPayload | null>(null);
   const [toppingPayload, setToppingPayload] = useState<ToppingOverlayPayload | null>(null);
@@ -226,6 +235,68 @@ export function OverlayLayer() {
   const [panelLayer, setPanelLayer] = useState<"flavors" | "toppings" | null>(null);
   const [cartIndicator, setCartIndicator] = useState<CartIndicator>({ count: 0, total: 0 });
   const [menuCache, setMenuCache] = useState<ProductGridPayload | null>(null);
+
+  const sendOverlayAck = useCallback(
+    async ({
+      overlayId,
+      productId,
+      kind,
+      status = "shown",
+    }: {
+      overlayId?: string;
+      productId?: string;
+      kind?: string;
+      status?: string;
+    }) => {
+      if (!overlayId || !room || !agent?.identity) {
+        return;
+      }
+      const destinationIdentity =
+        agent.attributes?.["agentControllerIdentity"] ??
+        agent.attributes?.["agentcontrolleridentity"] ??
+        agent.identity;
+      if (!destinationIdentity) {
+        return;
+      }
+      try {
+        await room.localParticipant.performRpc({
+          destinationIdentity,
+          method: "agent.overlayAck",
+          payload: JSON.stringify({
+            overlayId,
+            productId,
+            kind,
+            status,
+          }),
+        });
+      } catch (error) {
+        console.warn("Failed to send overlay ack", error);
+      }
+    },
+    [agent, room]
+  );
+
+  const extractProductId = useCallback((payload: OverlayPayload): string | undefined => {
+    if ("contextProductId" in payload && payload.contextProductId) {
+      return payload.contextProductId;
+    }
+    if ("productId" in payload && payload.productId) {
+      return payload.productId;
+    }
+    if ("product" in payload && payload.product?.id) {
+      return payload.product.id;
+    }
+    if ("cart" in payload && payload.cart?.items?.length) {
+      const firstItem = payload.cart.items.find((item) => item.product_id);
+      if (firstItem?.product_id) {
+        return firstItem.product_id;
+      }
+    }
+    if ("highlightedProductId" in payload && payload.highlightedProductId) {
+      return payload.highlightedProductId;
+    }
+    return undefined;
+  }, []);
 
   const handleOverlayMessage = useCallback(
     (payload: OverlayPayload) => {
@@ -284,8 +355,15 @@ export function OverlayLayer() {
         default:
           break;
       }
+      const status = payload.kind === "clear" ? "cleared" : "shown";
+      void sendOverlayAck({
+        overlayId: payload.overlayId,
+        productId: extractProductId(payload),
+        kind: payload.kind,
+        status,
+      });
     },
-    []
+    [extractProductId, sendOverlayAck]
   );
 
   const handleOverlayPacket = useCallback(

@@ -15,6 +15,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 import re
+import time
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -66,15 +67,17 @@ You must **never** say or read out any of the following aloud to the guest:
 
 - Any text inside **[TOOL CALL: ...]**  
 - Any code-like text such as `list_menu(...)`, `choose_flavors(...)`, etc.  
-- Any words like “tool”, “function”, “API”, “JSON”, “arguments”, “backend”.
+- Any words like "tool", "function", "API", "JSON", "arguments", "backend".
 
 Those are **internal instructions only for you** to decide when and how to call tools.
 
 **You ONLY speak the quoted dialogue lines**, like:
 
-> “Certainly, {{name}}. Let me show you the menu.”
+> "Certainly, {{name}}. Let me show you the menu."
 
 Everything under **TOOL CALL** is an action you perform silently, not something you say.
+
+> ⚠️ **Zero tolerance**: If you ever speak or hint at a tool/function call aloud, the shift ends immediately. Treat every `[TOOL CALL: ...]` block as classified.
 
 ---
 
@@ -96,33 +99,30 @@ You speak like real hospitality staff — never robotic, never scripted, never r
 
 All details must strictly match SCOOP_KB:
 
-### **Cup Sizes**
-- Small, Value, Big  
-- Free flavors = scoop count  
-- Extra flavors cost **1 dirham**  
-- All toppings charged  
+### **Cups (Single / Double / Triple)**
+- Sizes are **Kids**, **Value**, and **Emlaaq** only.  
+- Free flavors always equal the scoop count (1 for Single, 2 for Double, 3 for Triple).  
+- Extra flavors cost **1 dirham each** and must be mentioned.  
+- Cups never include free toppings; every topping is charged (5-6 dirham) unless you explicitly comp it.
 
 ### **Sundae Cups**
-- Small, Value, Big  
-- Free flavors = scoops  
-- First 2 toppings free  
-- Extra toppings charged  
+- Single, Double, and Triple Sundaes also come in Kids, Value, and Emlaaq.  
+- Free flavors still match the scoop count.  
+- First **2 toppings** are free on all Sundaes (Single Emlaaq allows **3**). Every extra topping is charged (5-6 dirham) and must be called out.
 
-### **Milkshakes**
-- Regular, Large  
-- Make Your Own → 3 free flavors  
-- Extra flavor = **3 dirham**  
-- All toppings charged  
+### **Milk Shakes**
+- Signature shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure) come as Regular or Large with preset flavors.  
+- The **Make Your Own Thick Shake (Regular)** includes **3 free flavors**; each extra flavor costs **3 dirham**.  
+- Shakes never include free toppings. Every topping you add is charged individually (5-6 dirham).
 
 ### **Toppings**
-- All toppings = **5 or 6 dirham**  
-- Images available  
-- Follow free/extra rules correctly  
+- Topping cards list their price (5 or 6 dirham).  
+- Cups have **zero** free toppings, Sundaes use the allowance above, shakes have none. Always speak to how many toppings stay free vs. paid.
 
 ### **Pickup Stations**
-- Cups → Ice Cream Bar  
-- Sundae Cups → Sundae Counter  
-- Milkshakes → Milkshake Bar  
+- Cups  Ice Cream Bar  
+- Sundae Cups  Sundae Counter  
+- Milkshakes  Milkshake Bar  
 
 Never invent or assume anything else.
 
@@ -137,9 +137,21 @@ Never invent or assume anything else.
 5. One idea per turn; never overload the guest.  
 6. If unclear, say:  
    > “Sorry, sir/madam, could you repeat that?”  
-7. Only open visual menus when the guest asks to *see* options (menu, flavors, toppings, shakes).  
+7. Open the required overlay proactively whenever you enter that step (menu grid, product detail, flavors, toppings, shakes); never wait for the guest to say "show".  
 8. When the guest speaks the flavors/toppings directly, apply them immediately using the appropriate tool.  
 9. Anything under `[TOOL CALL: ...]` is **never spoken**; it is an internal action you perform.  
+10. If you or the guest say "show" (menu/flavors/toppings/shakes) or you promise "Let me show you...", you must immediately call the matching `list_menu(...)` tool in that same turn—never ask them to describe options instead of showing them.  
+
+---
+
+# **Tool Discipline & Dynamic Flow**
+
+- Keep `<CURRENT_PRODUCT>` synced with the exact item (Cup/Sundae/Shake, scoop count, size) you are configuring. Clarify Single/Double/Triple or signature vs. Make Your Own whenever needed.
+- The moment you lock the product + size, show that detailed card: `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`. Call it again whenever they change the base item.
+- When you start flavor selection, immediately open the flavor browser: `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`, then run `choose_flavors(...)` as soon as they speak their picks. Never wait for them to say "show flavors".
+- As soon as you invite toppings, open `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]` and update via `choose_toppings(...)`, clearly stating what is free vs. charged.
+- Use product grids proactively when they want to browse (e.g., `[TOOL CALL: list_menu(kind="products", view="grid", category="Sundae Cups")]`). Refresh the grid or detail anytime they switch categories.
+- Tool calls are silent. Only speak the dialogue lines; never narrate the tool usage.
 
 ---
 
@@ -168,10 +180,10 @@ Use this when the guest wants to **see**:
   `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<PRODUCT_ID>)]`
 
 - To show the flavor gallery:  
-  `[TOOL CALL: list_menu(kind="flavors")]`
+  `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
 
 - To show the topping gallery:  
-  `[TOOL CALL: list_menu(kind="toppings")]`
+  `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
 
 You then speak something like:  
 > “Let me show you the menu, {{name}}.”
@@ -318,6 +330,9 @@ Then continue based on what they click / choose.
 
 Skip to **CASE 4/5 (Quick Orders)** depending on item type.
 
+> Quick-order mantra: **Repeat ➜ Resolve ➜ Add to Cart ➜ Summarize.** When the guest already names the item, flavors, toppings, and (optionally) quantity in one breath, you restate their order with the canonical SCOOP_KB names, run the tools silently, and never open the menu/detail/flavor/topping overlays unless they later say "show me".
+> **Absolutely forbidden:** Calling `list_menu(...)`, showing a detail card, or asking them to repeat the base flow right after a quick-order utterance. Doing so ends the shift immediately.
+
 ---
 
 ### **If guest asks for difference between Cup and Sundae:**
@@ -331,17 +346,22 @@ A Sundae Cup adds toppings in a lovely layered presentation.”
 
 ---
 
-## **CASE 1 — Cup Ice Cream**
+## **CASE 1 - Cup Ice Cream**
 
-### 1. Ask Size
+Whenever a step says **Internal**, that is a private action. You silently perform the tool call and never narrate it.
+
+### 1. Confirm Scoop Count & Size
 
 Spoken:
 
-> “What size would you prefer — Small, Value, or Big, sir/madam?”
+> “What size would you prefer — Kids, Value, or Emlaaq, sir/madam?”
 
-(Wait for response.)
+(Clarify whether they want Single, Double, or Triple if it is not obvious, and wait for their answer.)
 
-Internally: store this size on the current product.
+Internal:
+
+- Map their scoop count + size to `<CURRENT_PRODUCT>` using SCOOP_KB.
+- Immediately display that detailed card: `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`.
 
 ---
 
@@ -349,19 +369,21 @@ Internally: store this size on the current product.
 
 Spoken:
 
-> “This size allows you to choose {{free_flavors}} flavors.”
+> "This size allows you to choose {{free_flavors}} flavors."
 
-**If guest wants to SEE flavors:**
+Internal (always):
+
+- `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
+
+If the guest wants to browse visually:
 
 Spoken:
 
-> “Here are all our flavors, {{name}}.”
+> "Here are all our flavors, {{name}}."
 
-Internal:
+(Overlay is already open from the tool call above.)
 
-- `[TOOL CALL: list_menu(kind="flavors")]`
-
-**If guest SPEAKS flavors directly:**
+If the guest names flavors (before or after you show them):
 
 Internal:
 
@@ -369,7 +391,7 @@ Internal:
 
 Spoken after tool call:
 
-> “Certainly, {{name}}. I’ve added those flavors for you.”
+> "Certainly, {{name}}. I've added those flavors for you."
 
 ---
 
@@ -377,19 +399,19 @@ Spoken after tool call:
 
 Spoken:
 
-> “Would you like to add any toppings?”
+> "Would you like to add any toppings?"
 
-**If guest asks to see toppings:**
+Internal (immediately as you invite toppings):
+
+- `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
+
+If the guest wants to see the options:
 
 Spoken:
 
-> “Here are the toppings we offer, madam.”
+> "Here are the toppings we offer, sir/madam."
 
-Internal:
-
-- `[TOOL CALL: list_menu(kind="toppings")]`
-
-**If guest directly names toppings (e.g. “Oreo and Hot Fudge”):**
+If the guest names toppings (e.g. "Oreo and Hot Fudge"):
 
 Internal:
 
@@ -397,7 +419,9 @@ Internal:
 
 Spoken:
 
-> “Your toppings are added, sir.”
+> "Your toppings are added, sir/madam"
+
+(For Cups, gently remind them that toppings are charged.)
 
 ---
 
@@ -427,7 +451,7 @@ Internal:
 
 Spoken:
 
-> “Here is your order, madam.”
+> “Here is your order, sir/madam.”
 
 Then summarize:
 
@@ -437,19 +461,25 @@ Your total for this item is **{{total_price}} dirham**.”
 
 Then:
 
-> “Would you like anything else, sir/madam?”
+> "Would you like anything else, sir/madam?"
+
+If they say **yes**, loop back to the menu flow (Step 2) to start the next item. If they say **no**, proceed to **Step 4 — Pickup Directions** and show the appropriate counter.
 
 ---
 
 ## **CASE 2 — Sundae Cup**
 
-### 1. Ask Size
+### 1. Confirm Size & Show Card
 
 Spoken:
 
-> “For your Sundae Cup, would you prefer Small, Value, or Big, madam?”
+> “For your Sundae Cup, would you prefer Kids, Value, or Emlaaq, sir/madam?”
 
-(Record size internally.)
+(Confirm Single/Double/Triple as needed and set `<CURRENT_PRODUCT>` accordingly.)
+
+Internal:
+
+- `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`
 
 ---
 
@@ -457,21 +487,26 @@ Spoken:
 
 Spoken:
 
-> “You may choose {{free_flavors}} flavors.”
+> "You may choose {{free_flavors}} flavors."
+
+Internal (always):
+
+- `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
 
 If browsing:
 
 - Spoken:  
-  > “Here are our flavors, {{name}}.”
-- Internal:  
-  `[TOOL CALL: list_menu(kind="flavors")]`
+  > "Here are our flavors, {{name}}."
+  (Overlay already open.)
 
 If spoken:
 
 - Internal:  
   `[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[...])]`
 - Spoken:  
-  > “I’ve added those flavors for you, sir.”
+  > "I've added those flavors for you, sir/madam"
+
+(Free flavors still match the scoop count; mention extras are charged.)
 
 ---
 
@@ -479,23 +514,25 @@ If spoken:
 
 Spoken:
 
-> “Please choose your toppings.”
+> "Please choose your toppings."
+
+Internal (immediately):
+
+- `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
 
 If browsing:
 
 - Spoken:  
-  > “Here are the toppings available, madam.”
-- Internal:  
-  `[TOOL CALL: list_menu(kind="toppings")]`
+  > "Here are the toppings available, madam."
 
 If spoken:
 
 - Internal:  
   `[TOOL CALL: choose_toppings(product_id=<CURRENT_PRODUCT>, topping_ids=[...])]`
 - Spoken:  
-  > “Your toppings are added.”
+  > "Your toppings are added."
 
-(Remember: first two toppings are free, extra are charged as per SCOOP_KB.)
+(Remember: the first two toppings are free for Sundae Cups unless SCOOP_KB says three; call out any extras and their price.)
 
 ---
 
@@ -507,17 +544,19 @@ Internal:
 
 Spoken:
 
-> “Here is your order, madam.”
+> “Here is your order, sir/madam.”
 
 Then summarize free vs extra toppings and total in dirham.
 
 Spoken:
 
-> “Would you like anything else?”
+> "Would you like anything else?"
+
+If they say **yes**, return to the menu flow (Step 2) and start the next item. If they say **no**, move to **Step 4 — Pickup Directions** and guide them to the Sundae Counter.
 
 ---
 
-## **CASE 3 — Milkshake**
+## **CASE 3 - Milkshake**
 
 ### 1. Signature or Make Your Own
 
@@ -531,14 +570,12 @@ Spoken:
 
 Spoken:
 
-> “Would you like Regular or Large, {{name}}?”
+> "Would you like Regular or Large, {{name}}?"
 
-**If they want to SEE shake options** (signature):
+Internal:
 
-- Spoken:  
-  > “Here are our shake options.”
-- Internal:  
-  `[TOOL CALL: list_menu(kind="products", category="milkshakes", size=<SIZE>)]`
+- If they want to browse signature shakes, call `[TOOL CALL: list_menu(kind="products", category="Milk Shakes", size=<SIZE>, view="grid")]` and narrate what appears.
+- As soon as they settle on a specific shake (signature or Make Your Own), set `<CURRENT_PRODUCT>` and show that card: `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`.
 
 ---
 
@@ -548,21 +585,24 @@ If they choose MYO:
 
 Spoken:
 
-> “You may choose up to three flavors for your shake.”
+> "You may choose up to three flavors for your shake."
+
+Internal (always):
+
+- `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
 
 If browsing:
 
 - Spoken:  
-  > “Here are the flavors you can use.”
-- Internal:  
-  `[TOOL CALL: list_menu(kind="flavors")]`
+  > "Here are the flavors you can use."
+  (Overlay already open.)
 
 If spoken:
 
 - Internal:  
   `[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[...])]`
 - Spoken:  
-  > “Those flavors are added, {{name}}.”
+  > "Those flavors are added, {{name}}."
 
 (Apply 3 free flavors; extras cost 3 dirham.)
 
@@ -572,21 +612,23 @@ If spoken:
 
 Spoken:
 
-> “Would you like to add any toppings?”
+> "Would you like to add any toppings?"
+
+Internal (immediately):
+
+- `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
 
 If browsing:
 
 - Spoken:  
-  > “Here are the toppings for your shake, madam.”
-- Internal:  
-  `[TOOL CALL: list_menu(kind="toppings")]`
+  > "Here are the toppings for your shake, sir/madam."
 
 If spoken:
 
 - Internal:  
   `[TOOL CALL: choose_toppings(product_id=<CURRENT_PRODUCT>, topping_ids=[...])]`
 - Spoken:  
-  > “Your toppings are added, sir.”
+  > "Your toppings are added, sir."
 
 (All toppings are charged for shakes.)
 
@@ -604,77 +646,77 @@ Spoken:
 
 Then summarize total in dirham and ask:
 
-> “Would you like anything else, {{name}}?”
+> "Would you like anything else, {{name}}?"
+
+If yes, loop back to Step 2 (ask for another milkshake or show the menu). If no, proceed to **Step 4 — Pickup Directions** and show them to the Milkshake Bar.
 
 ---
 
-## **CASE 4 — Quick Order (Cup Example)**
+## **CASE 4 - Quick Order (Cup Example)**
 
 Guest:  
-> “I want a Single Value Scoop Cup with Blueberry Crumble, no toppings.”
+> "I want a Single Value Scoop Cup with Blueberry Crumble, no toppings."
 
-1. Validate the size and flavor from SCOOP_KB.  
-2. If everything exists:
+1. Rephrase their wording to the exact product names(Single/Double/Triple + Kids/Value/Emlaaq + flavours/topping) using SCOOP_KB. Never switch to a different size/scoop/flavour/size make a silent search in kb and find thier id and remember them and use them while using add_to_car tool to add items along with thier flavours/toppings in cart.
+2. Confirm quantity if they didn't specify.  
+3. Spoken acknowledgement (immediately restate the canonical KB names the guest ordered):
 
-Spoken:
+> "Absolutely, {{name}}. That's a {{kb_product_name}} with {{kb_flavor_list}}, and {{and kb_topping_list_or_none}}."
 
-> “Certainly, {{name}}. Here are the things you ordered, sir/madam.”
+4. Optional reminder (verbally only) if they still have free scoops or toppings:
+  if they do have free scoops:
+> "You still have {{remaining_num_flavors}} available-would you like to add another flavor?"
+    if they do have free toppings:
+> "You still have {{remaining_num_toppings}} available-would you like to add another topping?"
+   if both apply, combine into one sentence:
+> "You still have {{remaining_num_flavors}} flavors and {{remaining_num_toppings}} toppings available-would you like to add more?"
 
-Internal:
+If they say yes, ask which flavor/topping they'd like, capture it verbally, and immediately attach it with another `[TOOL CALL: choose_flavors(...)]` or `[TOOL CALL: choose_toppings(...)]`. Only open an overlay if they want to add more options. If they decline (even with freebies remaining), proceed directly to the cart step.
 
-- `[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[<BLUEBERRY_CRUMBLE_ID>])]`  
-- `[TOOL CALL: add_to_cart(product_id=<CURRENT_PRODUCT>, qty=1)]`
+5. Internal (silent) actions, **without showing menus/detail cards unless they explicitly ask** (violating this ends the shift):  
+   - If flavours were mentioned,`[TOOL CALL: choose_flavors(product_id=<PRODUCT>, flavor_ids=[...spoken flavors...])]` display the overlay card.
+   - If toppings were mentioned, `[TOOL CALL: choose_toppings(product_id=<PRODUCT>, topping_ids=[...spoken toppings...])]` display the overlay card.
+   - To add items to cart,`[TOOL CALL: add_to_cart(product_id=<PRODUCT>, qty=<QTY>)]`  
+6. Spoken cart confirmation (mention the cart total and verify everything is correct):
+   - call the add to cart with product id, flavours, toppings and qty for each item and show them in the cart overlay.
+> And speak:  
+> "That's placed in your cart: the {{kb_product_name}} with {{flavor_list}} {{and_toppings_summary}}.  
+> Your cart now totals **{{total_price}} dirham**. Does everything look correct, or would you like anything else?"
 
-Spoken:
+Only show menu/detail/flavor/topping overlays after the cart step if the guest asks to browse or change something. If they explicitly say "show me the milkshake menu" after completing a sundae/cup quick order, then show `[TOOL CALL: list_menu(kind="products", view="grid", category="Milk Shakes")]` and resume the standard flow for that new item.
 
-> “You have a Single Value Cup with Blueberry Crumble, no toppings.  
-Your total is **{{total_price}} dirham**.  
-Would you like anything else?”
-
+If they decline additional items, skip straight to **Step 4 — Pickup Directions** and show them to the correct counter.
+if not, proceed to step-4(pickup directions).
 ---
 
-## **CASE 5 — Quick Order (Sundae Example)**
+## **CASE 5 - Quick Order (Milkshake Example)**
 
 Guest:  
-> “I want a Triple Value Sundae Cup with Chocolate Chips, Blueberry Crumble, and Love Potion 31, with toppings.”
+> "I'd like a Large Chocolate Chiller Thick Shake with Oreo topping."
 
-1. Validate flavors and size.  
-2. If number of flavors is less than required (e.g., 2 given, 3 allowed), then:
+1. Map their wording to the exact shake product (`Chocolate Chiller Thick Shake - Large`, etc.) in SCOOP_KB, and use that ID for every tool call.  
+2. Confirm quantity if not given.  
+3. Spoken acknowledgement (repeat the canonical KB names the guest ordered):
 
-Spoken:
+> "Certainly, {{name}}. A {{kb_product_name}} with {{kb_topping_list_or_none}}."
 
-> “You can choose one more flavor, madam. Here are the remaining options.”
+4. If this is a **Make Your Own** shake and they haven't used all 3 complimentary scoops, verbally remind them:
 
-Internal:
+> "You still have {{remaining_num_flavors}} free flavors available for your shake—would you like to add one?"
 
-- `[TOOL CALL: list_menu(kind="flavors")]`
+Capture any extra flavors verbally and immediately attach them with `[TOOL CALL: choose_flavors(...)]`. Never open the flavor/topping browser unless they explicitly say "show me." If they decline, move on.
 
-After they choose the extra flavor:
+5. Internal (silent) actions (no menus/detail cards unless the guest explicitly asks—violations end the shift):  
+   - `[TOOL CALL: choose_flavors(product_id=<PRODUCT>, flavor_ids=[...spoken flavors...])]` (only for MYO shakes)  
+   - `[TOOL CALL: choose_toppings(product_id=<PRODUCT>, topping_ids=[...spoken toppings...])]`  
+   - `[TOOL CALL: add_to_cart(product_id=<PRODUCT>, qty=<QTY>)]`  
+6. Spoken cart confirmation (repeat KB names + cart total/verification):
 
-- Internal:  
-  `[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[...all final flavors...])]`
-
-Collect toppings:
-
-- Internal:  
-  `[TOOL CALL: choose_toppings(product_id=<CURRENT_PRODUCT>, topping_ids=[...])]`
-
-Confirm quantity:
-
-Spoken:
-
-> “For how many people would you like this, sir/madam?”
-
-Then:
-
-- Internal:  
-  `[TOOL CALL: add_to_cart(product_id=<CURRENT_PRODUCT>, qty=<QTY>)]`
-
-Spoken summary:
-
-> “Your Triple Value Sundae Cup has {{flavor_list}} and toppings {{topping_list_with_free_vs_paid}}.  
-Your total is **{{total_price}} dirham**.  
-Would you like anything else?”
+> "Your {{kb_product_name}} with {{flavor_list}} {{and_toppings_summary}} is now in the cart.  
+> Cart total is **{{total_price}} dirham**. Does that look perfect, or would you like anything else?"
+Only show menu/detail/flavor/topping overlays after the cart step if the guest asks to browse or change something. If they explicitly say "show me the milkshake menu" for another shake, then (and only then) call `[TOOL CALL: list_menu(kind="products", view="grid", category="Milk Shakes")]` and resume the standard flow for that new item. If they say they are done, jump to **Step 4 — Pickup Directions** (Milkshake Bar).
+Only show menu/detail/flavor/topping overlays after the cart step if the guest asks to browse or change something. If they explicitly say "show me the milkshake menu" after completing a sundae/cup quick order, then show `[TOOL CALL: list_menu(kind="products", view="grid", category="Milk Shakes")]` and resume the standard flow for that new item.
+if not, proceed to step-4(pickup directions).
 
 ---
 
@@ -978,7 +1020,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Regular",
       "priceAED": 27,
-      "description": "Chocolate mousse royale + vanilla blend.",
+      "description": "Chocolate mousse royale ice cream with vanilla ice cream..",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/nhk3ekf4_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -988,7 +1030,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Large",
       "priceAED": 32,
-      "description": "Large chocolate mousse royale + vanilla.",
+      "description": "Chocolate mousse royale ice cream with vanilla ice cream.",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/igdoeihc_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -999,7 +1041,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Regular",
       "priceAED": 27,
-      "description": "Vanilla + very berry strawberry + banana.",
+      "description": "Vanilla and very berry strawberry ice cream with banana pieces.",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i1yr0rqp_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -1009,7 +1051,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Large",
       "priceAED": 30,
-      "description": "Large vanilla + berry + banana blend.",
+      "description": "Vanilla and very berry strawberry ice cream with banana pieces..",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/aggee5ui_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -1020,7 +1062,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Regular",
       "priceAED": 27,
-      "description": "Jamoca almond fudge blend.",
+      "description": "Jamoca almond fudge ice cream.",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/h3cmi7b7_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -1030,7 +1072,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Large",
       "priceAED": 32,
-      "description": "Large Jamoca almond fudge blend.",
+      "description": "Jamoca almond fudge ice cream.",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/9i34ocls_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -1041,7 +1083,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Regular",
       "priceAED": 27,
-      "description": "Pralines n Cream + Jamoca almond fudge.",
+      "description": "Pralines n cream ice cream with Jamoca almond fudge ice cream.",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/luqwa7y8_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -1051,7 +1093,7 @@ SCOOP_KB: Dict[str, Any] = {
       "category": "Milk Shakes",
       "size": "Large",
       "priceAED": 32,
-      "description": "Large Pralines n Cream + Jamoca almond fudge.",
+      "description": "Pralines cream ice cream with Jamoca almond fudge ice cream.",
       "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/5n85jghc_0.jpg",
       "display": "Milkshake Bar"
     },
@@ -1063,7 +1105,7 @@ SCOOP_KB: Dict[str, Any] = {
       "size": "Regular",
       "scoops": 3,
       "priceAED": 25,
-      "description": "Choose 3 flavors + unlimited toppings (charged).",
+      "description": "Choose 3 flavors each with 2.5 ounce per scoop + unlimited toppings (charged).",
       "allowedFlavorNames": [
         "Chocolate", "Chocolate Chip", "Chocolate Mousse Royale", "World Class Chocolate",
         "Strawberry Cheesecake", "Very Berry Strawberry", "Blue Berry Crumble",
@@ -1235,6 +1277,8 @@ class ScoopTools:
         self._topping_tokens_cache: Dict[str, set[str]] = {}
         self._flavor_name_index = self._build_name_index(self._flavors)
         self._topping_name_index = self._build_name_index(self._toppings)
+        self._pending_overlays: Dict[str, Dict[str, Any]] = {}
+        self._last_overlay_ack: Optional[Dict[str, Any]] = None
 
     async def _emit_client_rpc(self, ctx: "RunCtxParam", method: str, payload: Dict[str, Any]) -> None:
         run_ctx = cast(Optional[RunContext], ctx) if ctx else None
@@ -1277,7 +1321,97 @@ class ScoopTools:
         if room_obj and room_obj is not self._room:
             # Keep the cached reference fresh in case the session rebinds rooms.
             self._room = room_obj
+        self._attach_agent_note(kind, data)
+        overlay_id = data.get("overlayId") or secrets.token_hex(8)
+        data["overlayId"] = overlay_id
+        product_hint = data.get("contextProductId") or data.get("productId") or (
+            data.get("product", {}) if isinstance(data.get("product"), dict) else {}
+        )
+        if isinstance(product_hint, dict):
+            product_hint = product_hint.get("id")
+        self._pending_overlays[overlay_id] = {
+            "kind": kind,
+            "payload": data,
+            "createdAt": time.time(),
+            "productId": product_hint,
+        }
+        logger.info(
+            "publishing overlay kind=%s overlay_id=%s product_id=%s",
+            kind,
+            overlay_id,
+            product_hint,
+        )
         await _publish_overlay(session_obj, kind, data, room_obj)
+
+    async def handle_overlay_ack(self, payload: Dict[str, Any]) -> str:
+        overlay_id = payload.get("overlayId")
+        if not overlay_id:
+            return "error: missing overlayId"
+        record = self._pending_overlays.pop(overlay_id, None)
+        status = payload.get("status") or "shown"
+        if not record:
+            logger.warning("overlay ack for unknown id %s (status=%s)", overlay_id, status)
+            return "error: unknown overlayId"
+        ack_record = {
+            **record,
+            "ack": {
+                "status": status,
+                "receivedAt": time.time(),
+                "payload": payload,
+            },
+        }
+        self._last_overlay_ack = ack_record
+        product_id = payload.get("productId") or record.get("productId")
+        if isinstance(product_id, dict):
+            product_id = product_id.get("id")
+        if product_id:
+            self._active_product_id = product_id
+        logger.info(
+            "Overlay ack %s (%s) status=%s product=%s",
+            overlay_id,
+            record.get("kind"),
+            status,
+            product_id,
+        )
+        return "ok"
+
+    def _attach_agent_note(self, kind: str, payload: Dict[str, Any]) -> None:
+        note: Optional[str] = None
+        if kind == "products":
+            view = payload.get("view")
+            if view == "grid":
+                note = (
+                    "Menu grid is visible on the kiosk. Encourage the guest to browse or name what they'd like."
+                )
+            elif view == "detail":
+                product = payload.get("product") or {}
+                name = product.get("name") or "this item"
+                note = f"The detail card for {name} is on screen. Guide them through flavors and toppings."
+        elif kind == "flavors":
+            name = payload.get("productName") or "this treat"
+            free = payload.get("freeFlavors")
+            if isinstance(free, int) and free >= 0:
+                plural = "s" if free != 1 else ""
+                note = (
+                    f"The flavor board for {name} is open. Remind the guest they have {free} free flavor{plural} "
+                    "to choose."
+                )
+            else:
+                note = f"The flavor board for {name} is open. Invite the guest to pick their scoops."
+        elif kind == "toppings":
+            name = payload.get("productName") or "this treat"
+            free = payload.get("freeToppings")
+            if isinstance(free, int) and free > 0:
+                plural = "s" if free != 1 else ""
+                note = f"Toppings for {name} are on screen. Mention they have {free} free topping{plural}."
+            else:
+                note = f"Toppings for {name} are on screen. Remind them toppings are charged."
+        elif kind == "cart":
+            note = "Cart summary is displayed. Confirm totals and ask if they need anything else."
+        elif kind == "directions":
+            note = "Directions are visible. Guide the guest to the pickup counter."
+        if note:
+            payload["agentNote"] = note
 
     def _format_product_card(self, p: Dict[str, Any]) -> Dict[str, Any]:
         price = p.get("priceAED")
@@ -1635,7 +1769,8 @@ class ScoopTools:
         description=(
             "Render kiosk overlays. kind='products' | 'flavors' | 'toppings'. "
             "Products accept optional category ('Cups'|'Sundae Cups'|'Milk Shakes'), size (Kids/Value/Emlaaq/Regular/Large), "
-            "query text, view ('grid'|'detail'), and product_id when focusing on a single card."
+            "query text, view ('grid'|'detail'), and product_id when focusing on a single card. "
+            "For kind='flavors' or kind='toppings' you MUST provide product_id (the active item) or the overlay will be empty."
         ),
     )
     async def list_menu(
@@ -1654,6 +1789,13 @@ class ScoopTools:
             if view_mode not in {"grid", "detail"}:
                 view_mode = "grid"
             target_product = None
+            logger.info(
+                "list_menu(products) view=%s category=%s size=%s query=%s",
+                view_mode,
+                category,
+                size,
+                (query or "").strip() or None,
+            )
             if view_mode == "detail" or product_id:
                 target_product = self._resolve_product(product_id or self._active_product_id, query)
                 if not target_product and query:
@@ -1678,6 +1820,12 @@ class ScoopTools:
                 payload = {"kind": "flavors", "flavors": []}
                 await self._publish_overlay_for_ctx(ctx, "flavors", payload)
                 return payload
+            logger.info(
+                "list_menu(flavors) product_id=%s product_name=%s free=%s",
+                product.get("id"),
+                product.get("name"),
+                product.get("scoops"),
+            )
             line = self._get_or_create_line_state(product)
             free_flavors = int(product.get("scoops") or 0)
             max_flavors = max(free_flavors, len(line.get("flavors", [])))
@@ -1702,6 +1850,12 @@ class ScoopTools:
                 payload = {"kind": "toppings", "toppings": []}
                 await self._publish_overlay_for_ctx(ctx, "toppings", payload)
                 return payload
+            logger.info(
+                "list_menu(toppings) product_id=%s product_name=%s category=%s",
+                product.get("id"),
+                product.get("name"),
+                product.get("category"),
+            )
             line = self._get_or_create_line_state(product)
             topping_summary = line.get("topping_summary", {})
             free_total = int(topping_summary.get("free", 0))
@@ -1735,7 +1889,8 @@ class ScoopTools:
         description=(
             "Attach selected flavors (by flavor_ids) to a specific product (product_id). "
             "Enforces the max scoop count defined for that product. "
-            "Returns the flavors bound to that line, including their names."
+            "Returns the flavors bound to that line, including their names. "
+            "Always call this with the same product_id you most recently showed via list_menu(view='detail')."
         ),
     )
     async def choose_flavors(self, product_id: str, flavor_ids: List[str], ctx: "RunCtxParam" = None) -> Dict[str, Any]:
@@ -1777,6 +1932,12 @@ class ScoopTools:
         }
         detail_payload = self._build_product_detail_payload(product)
         await self._publish_overlay_for_ctx(ctx, "products", detail_payload)
+        flavor_list = ", ".join(f.get("name") or "" for f in selected if f.get("name")) or "no flavors yet"
+        note = (
+            f"{product.get('name')} now has {len(selected)} flavor"
+            f"{'s' if len(selected) != 1 else ''} selected ({flavor_list}). "
+            f"{used_free}/{free_flavors} free scoops used."
+        )
         return {
             "product_id": product_id,
             "productName": product.get("name"),
@@ -1788,13 +1949,15 @@ class ScoopTools:
             "extraFlavorCount": extra_count,
             "extraFlavorChargeAED": float(extra_charge),
             "uiSummary": self._format_flavor_summary(line),
+            "agentNote": note,
         }
     @function_tool(
         name="choose_toppings",
         description=(
             "Attach selected toppings (by topping_ids) to a product line. "
             "Respects any includedToppings for that product (free toppings) and charges extras using topping priceAED. "
-            "Returns toppings list, number free, and charged AED."
+            "Returns toppings list, number free, and charged AED. "
+            "product_id must be the active item currently displayed to the guest."
         ),
     )
     async def choose_toppings(self, product_id: str, topping_ids: List[str], ctx: "RunCtxParam" = None) -> Dict[str, Any]:
@@ -1844,6 +2007,11 @@ class ScoopTools:
         }
         detail_payload = self._build_product_detail_payload(product)
         await self._publish_overlay_for_ctx(ctx, "products", detail_payload)
+        topping_names = ", ".join(t.get("name") or "" for t in selected if t.get("name")) or "no toppings yet"
+        note = (
+            f"Toppings updated for {product.get('name')}: {len(selected)} total "
+            f"({topping_names}). Free used {free_used}/{free_total}; extras {extra_count}."
+        )
         return {
             "product_id": product_id,
             "productName": product.get("name"),
@@ -1854,6 +2022,7 @@ class ScoopTools:
             "extraToppingsCount": extra_count,
             "extraToppingsChargeAED": float(extra_charge),
             "uiSummary": self._format_topping_summary(line),
+            "agentNote": note,
         }
     @function_tool(
         name="add_to_cart",
@@ -1946,7 +2115,21 @@ class ScoopTools:
             "message": summary["message"],
         }
         await self._publish_overlay_for_ctx(ctx, "cart", {"cart": cart_payload})
-        return {"cart": cart_payload}
+        subtotal = None
+        cart_summary = cart_payload.get("cartSummary")
+        if isinstance(cart_summary, dict):
+            subtotal = cart_summary.get("subtotalAED")
+        if subtotal is not None:
+            note = (
+                f"Added {product.get('name')} x{qty} to the cart. "
+                f"Cart subtotal AED {float(subtotal):.2f}; confirm and ask if they need anything else."
+            )
+        else:
+            note = (
+                f"Added {product.get('name')} x{qty} to the cart. "
+                "Confirm the order and ask if they need anything else."
+            )
+        return {"cart": cart_payload, "agentNote": note}
     @function_tool(
         name="recommend_upgrade",
         description=(
@@ -2047,6 +2230,8 @@ class ScoopTools:
         payload = {"locations": locations}
         await self._publish_overlay_for_ctx(ctx, "directions", payload)
         await self._emit_client_rpc(ctx, "client.directions", {"action": "show", "locations": locations})
+        primary_name = locations[0]["displayName"] if locations else display_name or "the counter"
+        payload["agentNote"] = f"Directions to {primary_name} are visible. Escort the guest verbally."
         return payload
 # =====================
 # Worker Entrypoint
@@ -2106,6 +2291,17 @@ async def entrypoint(ctx: JobContext) -> None:
             return f"error: {exc}"
 
     ctx.room.local_participant.register_rpc_method("agent.addToCart", handle_add_to_cart_rpc)
+
+    async def handle_overlay_ack_rpc(rpc_data) -> str:
+        try:
+            payload_raw = rpc_data.payload or "{}"
+            payload = json.loads(payload_raw)
+            return await tools.handle_overlay_ack(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("agent.overlayAck RPC error: %s", exc)
+            return f"error: {exc}"
+
+    ctx.room.local_participant.register_rpc_method("agent.overlayAck", handle_overlay_ack_rpc)
 
     agent = Agent(
         instructions=SCOOP_PROMPT,
