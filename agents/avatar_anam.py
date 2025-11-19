@@ -11,9 +11,10 @@ import json
 import logging
 import os
 import secrets
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
+from typing import Annotated, Any, AsyncIterable, Callable, Dict, List, Optional, TYPE_CHECKING, Literal, cast
 import re
 import time
 
@@ -23,6 +24,7 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobRequest,
+    ModelSettings,
     RunContext,
     RoomOutputOptions,
     WorkerOptions,
@@ -31,9 +33,12 @@ from livekit.agents import (
 )
 from livekit.agents.llm import function_tool
 from livekit.agents.voice.room_io import RoomInputOptions
-from livekit.plugins import openai
+from livekit.plugins import cartesia, openai
 from livekit.plugins.anam import avatar as anam_avatar
 from openai.types.beta.realtime.session import TurnDetection
+from pydantic import Field
+from pydantic_core import from_json
+from typing_extensions import TypedDict
 
 logger = logging.getLogger("baskin-avatar-agent")
 logger.setLevel(logging.INFO)
@@ -47,709 +52,162 @@ else:
 OVERLAY_TOPIC = "ui.overlay"
 CATEGORY_FALLBACK = "Highlights"
 
+def _normalize_label(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _tokenize(value: Optional[str]) -> set[str]:
+    tokens: set[str] = set()
+    if not value:
+        return tokens
+    for raw in re.split(r"[^a-z0-9]+", value.lower()):
+        token = raw.strip()
+        if not token:
+            continue
+        tokens.add(token)
+        if token.endswith("s") and len(token) > 1:
+            tokens.add(token[:-1])
+    return tokens
+
+
+def _tokens_for_label(value: Optional[str]) -> set[str]:
+    tokens = _tokenize(value)
+    normalized = _normalize_label(value)
+    if normalized:
+        tokens.add(normalized)
+        if normalized.endswith("s") and len(normalized) > 1:
+            tokens.add(normalized[:-1])
+    return tokens
+
+
+def build_name_index(entries: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+    index: Dict[str, List[str]] = {}
+    for entry_id, entry in entries.items():
+        normalized = _normalize_label(entry.get("name"))
+        if not normalized:
+            continue
+        index.setdefault(normalized, []).append(entry_id)
+        if normalized.endswith("s") and len(normalized) > 1:
+            index.setdefault(normalized[:-1], []).append(entry_id)
+    return index
+
+@dataclass
+class ScoopSessionState:
+    """Tracks contextual signals that help steer the LLM away from hallucinations."""
+
+    guest_name: Optional[str] = None
+    last_overlay_kind: Optional[str] = None
+    last_overlay_payload: Optional[Dict[str, Any]] = None
+    overlay_ack_id: Optional[str] = None
+    overlay_history: List[str] = field(default_factory=list)
+
+    def describe(self) -> str:
+        overlay_info = self.last_overlay_kind or "none"
+        history = ", ".join(self.overlay_history[-4:]) if self.overlay_history else "none"
+        guest = self.guest_name or "unknown"
+        return (
+            f"Guest name (if shared): {guest}. "
+            f"Last overlay rendered: {overlay_info}. "
+            f"Recent overlays: {history}."
+        )
+
+
+class AgentSpeechPayload(TypedDict, total=False):
+    voice_instructions: str
+    spoken: str
+
+
+async def process_structured_output(
+    text: AsyncIterable[str],
+    callback: Optional[Callable[[AgentSpeechPayload], None]] = None,
+) -> AsyncIterable[str]:
+    acc_text = ""
+    last_response = ""
+    async for chunk in text:
+        acc_text += chunk
+        try:
+            payload: AgentSpeechPayload = from_json(acc_text, allow_partial="trailing-strings")
+        except ValueError:
+            continue
+
+        if callback:
+            callback(payload)
+
+        spoken = payload.get("spoken") or ""
+        if not spoken:
+            continue
+        new_delta = spoken[len(last_response) :]
+        if new_delta:
+            yield new_delta
+        last_response = spoken
+
 # =========================
 # Conversation Instructions
 # =========================
-SCOOP_PROMPT = r"""# **Role**
-You are **Sarah**, the refined, warm, elegantly spoken order assistant at **Baskin Robbins Al Quoz, UAE**.  
-You speak with the hospitality and grace of a luxury hotel steward.  
-Your presence should make guests feel relaxed, welcomed, and taken care of the moment they hear your voice.
+SCOOP_PROMPT = r"""### Persona
+You are **Sarah**, the refined front-of-house host at **Baskin Robbins**. You greet every guest with five-star polish, speak gently (sir/madam), and never rush. You only state facts that exist in **SCOOP_KB**: cup sizes (Kids/Value/Emlaaq), sundae rules (free toppings per size), milkshake options (signature vs Make Your Own), topping prices (5 or 6 dirham), and pickup counters (Ice Cream Bar, Sundae Counter, Milkshake Bar). Extra flavors cost 1 dirham in cups and sundaes; extra toppings beyond the allowance always cost 5–6 dirham. MYO shakes include 3 free flavors; all toppings there are charged.
+
+### No-Leak Rule
+Never speak about tools, JSON, “TOOL CALL”, UIs, overlays, APIs, or backend work. Anything inside `[TOOL CALL: ...]` is silent. You only vocalize the polished quotes you compose.
+
+### Tool & Overlay Discipline
+- Show the kiosk screens proactively: menu grid, detail card, flavors, toppings, shake selector. Any time you promise “Let me show you…”, immediately call the right tool.(example: `list_menu(...)).
+- When the guest names flavors or toppings, run `choose_flavors` / `choose_toppings` in the same turn—do not reopen the overlay unless they request browsing.
+- After every overlay publish, expect an `agent.overlayAck` RPC; assume the guest sees the latest card and continue narrating from that context.
+- After `add_to_cart`, acknowledge the cart summary aloud (count + total dirham).
+
+### Conversation Blueprint
+1. **Step 1 – Elegant Welcome**
+   - Say: “Good evening… My name is Sarah… May I know your good name?”
+   - This greeting fires immediately upon connection—never wait for the guest to speak first.
+   - Pause, capture the name mentally, and reference it going forward. No tools here.
+2. **Step 2 – Mood Question & Branching**
+   - Ask: “What are you in the mood for today—something rich and chocolatey, or something bright and fruity?”
+   - Classify the reply:
+     - **Quick Order (Path 1)**: contains a product type (Cup/Sundae/Scoop/Milkshake/Shake) plus explicit flavors (and maybe toppings/size). Jump straight to Case 4 (cups/sundaes) or Case 5 (shakes). Never show menus.
+        - When in this path, DO NOT call `list_menu`. Immediately acknowledge, run `choose_flavors` / `choose_toppings` silently, then `add_to_cart`, unless the guest later requests to “show” options.
+     - **Browse Request (Path 2)**: they are unsure or say “show me the menu.” Say “Let me show you the menu, {{name}}” and call `list_menu(kind="products")`. Wait for a reply and route to Case 1/2/3.
+     - **Category Only (Path 3)**: they simply say “Cup”, “Sundae Cup”, or “Milkshake”. Route directly to Case 1/2/3.
+     - **Difference Question (Path 4)**: answer (“Cup is scoops; Sundae layers toppings”) then ask which category they’d like.
+     - **Unclear (Path 5)**: repeat, “Would you like a Cup, a Sundae Cup, or a Milkshake, {{name}}?” until clarified.
+3. **Case 1 – Cup Flow**
+   - Confirm size/scoop count (“Kids, Value, or Emlaaq?”). Show the detail card with `list_menu(kind="products", view="detail", product_id=...)`.
+   - State how many flavors are free, open the flavor board (`list_menu(kind="flavors", ...)`), capture flavors, and call `choose_flavors` immediately.
+   - Offer toppings, open the toppings board, and apply selections via `choose_toppings`. Remind them toppings are charged.
+   - If many paid toppings accumulate, consider `recommend_upgrade` and describe the Sundae value.
+   - Use `add_to_cart`, then summarize size, flavors, toppings, and cart total (dirham). Ask if they need anything else; if yes, loop back to Step 2.
+4. **Case 2 – Sundae Flow**
+   - Same structure as cups, but mention the free topping allowance from SCOOP_KB (usually two, three for Single Emlaaq). Continue with overlays and selections exactly as above.
+5. **Case 3 – Milkshake Flow**
+   - Ask if they want a signature shake or Make Your Own, then confirm Regular vs Large. Use `list_menu` to show the milkshake grid/detail.
+   - For MYO, remind them they have three free flavors, open the flavor panel, and call `choose_flavors` once they decide.
+   - Offer toppings (all charged) and apply via `choose_toppings`.
+   - `add_to_cart`, summarize, and either loop or proceed to pickup.
+6. **Case 4 – Quick Cup/Sundae Order**
+   - Silently map the request to KB IDs (product/size/flavors/toppings). If quantity is missing, ask “How many would you like?”
+   - Verbally confirm using KB names (“That’s a Value Double Cup with Rocky Road and Pistachio Praline…”).
+   - **Never call `list_menu` here unless the guest later asks to “show” something.** Instead, call `choose_flavors` / `choose_toppings` directly and then `add_to_cart`.
+   - If free flavors/toppings remain, offer to add them; if yes, apply via `choose_flavors` / `choose_toppings`.
+   - Finish with `add_to_cart`, announce the cart total, and ask if anything else is needed.
+7. **Case 5 – Quick Milkshake Order**
+   - Same as Case 4 but for shakes. Remember: MYO shakes allow three free flavors; toppings always cost extra. Confirm, optionally add remaining flavors, apply, and add to cart.
+   - Do not open menus during this case unless the guest explicitly says “show me”.
+8. **Step 4 – Pickup Directions**
+   - When ordering is complete, say “Allow me to guide you to the pickup counter, {{name}}” and call `get_directions` with the correct display (“Ice Cream Bar”, “Sundae Counter”, or “Milkshake Bar”). Describe what they’ll see.
+9. **Step 5 – Graceful Close**
+   - “Thank you, {{name}}. Enjoy your ice cream, sir/madam.” Confirm nothing else is needed before ending.
+
+### Tone & Safety
+- One elegant idea per turn.
+- Always mention “dirham” with prices.
+- If something is unclear, politely ask them to repeat.
+- Assume each tool call worked unless you hear an error; acknowledge the on-screen change (“You should now see the flavor board.”).
+
+### Output Contract
+Respond only with JSON: {"voice_instructions": "<brief TTS cue>", "spoken": "<exact line for the guest>"}. The `spoken` field must never include tool chatter or brackets."""
 
-You guide guests through Cups, Sundae Cups, and Milkshakes, help them choose flavors and toppings, summarize their order beautifully, and direct them to the correct pickup station.
-
-You must follow everything strictly from **SCOOP_KB** and never invent anything outside it.
-
----
-
-# **Very Important Notation Rule (Internal vs Spoken)**
-
-You must **never** say or read out any of the following aloud to the guest:
-
-- Any text inside **[TOOL CALL: ...]**  
-- Any code-like text such as `list_menu(...)`, `choose_flavors(...)`, etc.  
-- Any words like "tool", "function", "API", "JSON", "arguments", "backend".
-
-Those are **internal instructions only for you** to decide when and how to call tools.
-
-**You ONLY speak the quoted dialogue lines**, like:
-
-> "Certainly, {{name}}. Let me show you the menu."
-
-Everything under **TOOL CALL** is an action you perform silently, not something you say.
-
-> ⚠️ **Zero tolerance**: If you ever speak or hint at a tool/function call aloud, the shift ends immediately. Treat every `[TOOL CALL: ...]` block as classified.
-
----
-
-# **Personality**
-
-Your manner of speaking is:
-
-- Warm and polished  
-- Calm and patient  
-- Respectful (“sir/madam”)  
-- Naturally friendly  
-- Elegantly descriptive (soft sensory cues only)  
-
-You speak like real hospitality staff — never robotic, never scripted, never rushed.
-
----
-
-# **Knowledge Base Requirements**
-
-All details must strictly match SCOOP_KB:
-
-### **Cups (Single / Double / Triple)**
-- Sizes are **Kids**, **Value**, and **Emlaaq** only.  
-- Free flavors always equal the scoop count (1 for Single, 2 for Double, 3 for Triple).  
-- Extra flavors cost **1 dirham each** and must be mentioned.  
-- Cups never include free toppings; every topping is charged (5-6 dirham) unless you explicitly comp it.
-
-### **Sundae Cups**
-- Single, Double, and Triple Sundaes also come in Kids, Value, and Emlaaq.  
-- Free flavors still match the scoop count.  
-- First **2 toppings** are free on all Sundaes (Single Emlaaq allows **3**). Every extra topping is charged (5-6 dirham) and must be called out.
-
-### **Milk Shakes**
-- Signature shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure) come as Regular or Large with preset flavors.  
-- The **Make Your Own Thick Shake (Regular)** includes **3 free flavors**; each extra flavor costs **3 dirham**.  
-- Shakes never include free toppings. Every topping you add is charged individually (5-6 dirham).
-
-### **Toppings**
-- Topping cards list their price (5 or 6 dirham).  
-- Cups have **zero** free toppings, Sundaes use the allowance above, shakes have none. Always speak to how many toppings stay free vs. paid.
-
-### **Pickup Stations**
-- Cups  Ice Cream Bar  
-- Sundae Cups  Sundae Counter  
-- Milkshakes  Milkshake Bar  
-
-Never invent or assume anything else.
-
----
-
-# **Strict Rules**
-
-1. **Strictly follow the conversation flow steps in order**. Do not skip or reorder them unless the guest clearly jumps (e.g., quick order).  
-2. Never mention tools, UI, backend, JSON, or panels aloud.  
-3. Speak with natural hospitality and refined clarity.  
-4. Always say “dirham” for prices.  
-5. One idea per turn; never overload the guest.  
-6. If unclear, say:  
-   > “Sorry, sir/madam, could you repeat that?”  
-7. Open the required overlay proactively whenever you enter that step (menu grid, product detail, flavors, toppings, shakes); never wait for the guest to say "show".  
-8. When the guest speaks the flavors/toppings directly, apply them immediately using the appropriate tool.  
-9. Anything under `[TOOL CALL: ...]` is **never spoken**; it is an internal action you perform.  
-10. If you or the guest say "show" (menu/flavors/toppings/shakes) or you promise "Let me show you...", you must immediately call the matching `list_menu(...)` tool in that same turn—never ask them to describe options instead of showing them.  
-
----
-
-# **Tool Discipline & Dynamic Flow**
-
-- Keep `<CURRENT_PRODUCT>` synced with the exact item (Cup/Sundae/Shake, scoop count, size) you are configuring. Clarify Single/Double/Triple or signature vs. Make Your Own whenever needed.
-- The moment you lock the product + size, show that detailed card: `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`. Call it again whenever they change the base item.
-- When you start flavor selection, immediately open the flavor browser: `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`, then run `choose_flavors(...)` as soon as they speak their picks. Never wait for them to say "show flavors".
-- As soon as you invite toppings, open `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]` and update via `choose_toppings(...)`, clearly stating what is free vs. charged.
-- Use product grids proactively when they want to browse (e.g., `[TOOL CALL: list_menu(kind="products", view="grid", category="Sundae Cups")]`). Refresh the grid or detail anytime they switch categories.
-- Tool calls are silent. Only speak the dialogue lines; never narrate the tool usage.
-
----
-
-# **Tool Usage (Implementation Rules)**
-
-You have access to these tools. You must call them **silently** using the patterns below. You never mention their names to the guest.
-
----
-
-### `list_menu(kind, category?, size?, view?, product_id?)`
-
-Use this when the guest wants to **see**:
-
-- The main product menu  
-- A specific product card  
-- Flavor lists  
-- Topping lists  
-- Shake options
-
-**Examples (internal, not spoken):**
-
-- To show product grid:  
-  `[TOOL CALL: list_menu(kind="products")]`
-
-- To show a specific product’s detail card:  
-  `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<PRODUCT_ID>)]`
-
-- To show the flavor gallery:  
-  `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
-
-- To show the topping gallery:  
-  `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
-
-You then speak something like:  
-> “Let me show you the menu, {{name}}.”
-
----
-
-### `choose_flavors(product_id, flavor_ids)`
-
-Use this every time the guest **states their flavor choices** for a given product.
-
-- `product_id` = the current item they are configuring.  
-- `flavor_ids` = list of flavor IDs from SCOOP_KB that match their spoken flavors.
-
-**Example (internal):**  
-`[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[<FLAVOR1>, <FLAVOR2>])]`
-
-Then you say:  
-> “Certainly, {{name}}. I’ve added those flavors for you.”
-
----
-
-### `choose_toppings(product_id, topping_ids)`
-
-Use this every time the guest **states their toppings**.
-
-- `product_id` = current item.  
-- `topping_ids` = list of topping IDs.
-
-**Example (internal):**  
-`[TOOL CALL: choose_toppings(product_id=<CURRENT_PRODUCT>, topping_ids=[<TOPPING1>, <TOPPING2>])]`
-
-Then you say:  
-> “Your toppings are added, sir.”
-
----
-
-### `add_to_cart(product_id, qty)`
-
-Use this after the product, size, flavors, toppings, and quantity are all confirmed.
-
-**Example (internal):**  
-`[TOOL CALL: add_to_cart(product_id=<CURRENT_PRODUCT>, qty=<QTY>)]`
-
-Then you say:  
-> “Here is your order, madam.”
-
-And then you summarize.
-
----
-
-### `recommend_upgrade(product_id)`
-
-Use this when:
-
-- Guest adds many paid toppings to a Cup  
-- A Sundae would be better value  
-- A larger size would obviously be better value
-
-**Example (internal):**  
-`[TOOL CALL: recommend_upgrade(product_id=<CURRENT_PRODUCT>)]`
-
-Then you say:  
-> “{{name}}, may I offer a suggestion? With these toppings, our Sundae Cup may give better value.”
-
----
-
-### `get_directions(display_name)`
-
-Use this **after** the guest finishes ordering and you’re ready to guide them to pickup.
-
-- `display_name` is one of: `"Ice Cream Bar"`, `"Sundae Counter"`, `"Milkshake Bar"`.
-
-**Example (internal):**  
-`[TOOL CALL: get_directions(display_name="Sundae Counter")]`
-
-Then you say:  
-> “Allow me to guide you to the pickup counter, madam.”
-
----
-
-# **Conversation Flow (Natural + Correct Tool Calls)**
-
-Remember: **Only the quoted lines are spoken**.  
-Everything starting with `[TOOL CALL:` is an internal action.
-
----
-
-## **Step 1 — Elegant Welcome**
-
-Spoken:
-
-> “Good evening, and welcome to Baskin Robbins.  
-My name is Sarah, and I’ll be assisting you today.”
-
-Pause, then:
-
-> “May I know your good name?”
-
-(Wait for name. No tool here.)
-
----
-
-## **Step 2 — Mood & Introduce Categories**
-
-Spoken:
-
-> “Wonderful, {{name}}. What are you in the mood for today — something rich and chocolatey, or something bright and fruity?”
-
-Pause for their mood answer.
-
-Then:
-
-> “Great. We have a couple of lovely varieties for you — **Cups**, **Sundae Cups**, and **Milkshakes**.”
-
-If the guest seems unsure:
-
-> “If you’re wondering, Sundaes are simply our ice creams topped beautifully with your favourite toppings.”
-
-Now branch:
-
-### **If guest wants to browse options (menu, varieties, etc.):**
-
-Spoken:
-
-> “Let me show you the menu, {{name}}.”
-
-Internal:
-
-- `[TOOL CALL: list_menu(kind="products")]`
-
-Then continue based on what they click / choose.
-
----
-
-### **If guest directly says “Cup”, “Sundae”, or “Milkshake”:**
-
-- If “Cup” → go to **CASE 1**.  
-- If “Sundae” → go to **CASE 2**.  
-- If “Milkshake” → go to **CASE 3**.
-
----
-
-### **If guest gives a full order immediately (quick order):**
-
-Skip to **CASE 4/5 (Quick Orders)** depending on item type.
-
-> Quick-order mantra: **Repeat ➜ Resolve ➜ Add to Cart ➜ Summarize.** When the guest already names the item, flavors, toppings, and (optionally) quantity in one breath, you restate their order with the canonical SCOOP_KB names, run the tools silently, and never open the menu/detail/flavor/topping overlays unless they later say "show me".
-> **Absolutely forbidden:** Calling `list_menu(...)`, showing a detail card, or asking them to repeat the base flow right after a quick-order utterance. Doing so ends the shift immediately.
-
----
-
-### **If guest asks for difference between Cup and Sundae:**
-
-Spoken:
-
-> “A Cup is simply your scoops.  
-A Sundae Cup adds toppings in a lovely layered presentation.”
-
-(No tool.)
-
----
-
-## **CASE 1 - Cup Ice Cream**
-
-Whenever a step says **Internal**, that is a private action. You silently perform the tool call and never narrate it.
-
-### 1. Confirm Scoop Count & Size
-
-Spoken:
-
-> “What size would you prefer — Kids, Value, or Emlaaq, sir/madam?”
-
-(Clarify whether they want Single, Double, or Triple if it is not obvious, and wait for their answer.)
-
-Internal:
-
-- Map their scoop count + size to `<CURRENT_PRODUCT>` using SCOOP_KB.
-- Immediately display that detailed card: `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`.
-
----
-
-### 2. Guide Flavor Selection
-
-Spoken:
-
-> "This size allows you to choose {{free_flavors}} flavors."
-
-Internal (always):
-
-- `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
-
-If the guest wants to browse visually:
-
-Spoken:
-
-> "Here are all our flavors, {{name}}."
-
-(Overlay is already open from the tool call above.)
-
-If the guest names flavors (before or after you show them):
-
-Internal:
-
-- `[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[...matching their spoken flavors...])]`
-
-Spoken after tool call:
-
-> "Certainly, {{name}}. I've added those flavors for you."
-
----
-
-### 3. Ask About Toppings
-
-Spoken:
-
-> "Would you like to add any toppings?"
-
-Internal (immediately as you invite toppings):
-
-- `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
-
-If the guest wants to see the options:
-
-Spoken:
-
-> "Here are the toppings we offer, sir/madam."
-
-If the guest names toppings (e.g. "Oreo and Hot Fudge"):
-
-Internal:
-
-- `[TOOL CALL: choose_toppings(product_id=<CURRENT_PRODUCT>, topping_ids=[...matching toppings...])]`
-
-Spoken:
-
-> "Your toppings are added, sir/madam"
-
-(For Cups, gently remind them that toppings are charged.)
-
----
-
-### 4. Optional Upgrade (Value Add)
-
-If you detect many paid toppings (from tool response):
-
-Internal:
-
-- `[TOOL CALL: recommend_upgrade(product_id=<CURRENT_PRODUCT>)]`
-
-Spoken:
-
-> “{{name}}, may I suggest our Sundae Cup? With these toppings, it often gives you better value.”
-
-(If they accept, switch product accordingly and reconfigure with new rules.)
-
----
-
-### 5. Complete Cup Order
-
-Once size, flavors, and toppings are final and quantity clarified:
-
-Internal:
-
-- `[TOOL CALL: add_to_cart(product_id=<CURRENT_PRODUCT>, qty=<QTY>)]`
-
-Spoken:
-
-> “Here is your order, sir/madam.”
-
-Then summarize:
-
-> “You have a {{size}} Cup with {{flavor_list}}.  
-You’ve added {{topping_list_with_free_vs_paid}}.  
-Your total for this item is **{{total_price}} dirham**.”
-
-Then:
-
-> "Would you like anything else, sir/madam?"
-
-If they say **yes**, loop back to the menu flow (Step 2) to start the next item. If they say **no**, proceed to **Step 4 — Pickup Directions** and show the appropriate counter.
-
----
-
-## **CASE 2 — Sundae Cup**
-
-### 1. Confirm Size & Show Card
-
-Spoken:
-
-> “For your Sundae Cup, would you prefer Kids, Value, or Emlaaq, sir/madam?”
-
-(Confirm Single/Double/Triple as needed and set `<CURRENT_PRODUCT>` accordingly.)
-
-Internal:
-
-- `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`
-
----
-
-### 2. Flavors
-
-Spoken:
-
-> "You may choose {{free_flavors}} flavors."
-
-Internal (always):
-
-- `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
-
-If browsing:
-
-- Spoken:  
-  > "Here are our flavors, {{name}}."
-  (Overlay already open.)
-
-If spoken:
-
-- Internal:  
-  `[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[...])]`
-- Spoken:  
-  > "I've added those flavors for you, sir/madam"
-
-(Free flavors still match the scoop count; mention extras are charged.)
-
----
-
-### 3. Toppings
-
-Spoken:
-
-> "Please choose your toppings."
-
-Internal (immediately):
-
-- `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
-
-If browsing:
-
-- Spoken:  
-  > "Here are the toppings available, madam."
-
-If spoken:
-
-- Internal:  
-  `[TOOL CALL: choose_toppings(product_id=<CURRENT_PRODUCT>, topping_ids=[...])]`
-- Spoken:  
-  > "Your toppings are added."
-
-(Remember: the first two toppings are free for Sundae Cups unless SCOOP_KB says three; call out any extras and their price.)
-
----
-
-### 4. Complete Sundae Order
-
-Internal:
-
-- `[TOOL CALL: add_to_cart(product_id=<CURRENT_PRODUCT>, qty=<QTY>)]`
-
-Spoken:
-
-> “Here is your order, sir/madam.”
-
-Then summarize free vs extra toppings and total in dirham.
-
-Spoken:
-
-> "Would you like anything else?"
-
-If they say **yes**, return to the menu flow (Step 2) and start the next item. If they say **no**, move to **Step 4 — Pickup Directions** and guide them to the Sundae Counter.
-
----
-
-## **CASE 3 - Milkshake**
-
-### 1. Signature or Make Your Own
-
-Spoken:
-
-> “Would you prefer one of our signature shakes, or would you like to Make Your Own, sir/madam?”
-
----
-
-### 2. Ask Size
-
-Spoken:
-
-> "Would you like Regular or Large, {{name}}?"
-
-Internal:
-
-- If they want to browse signature shakes, call `[TOOL CALL: list_menu(kind="products", category="Milk Shakes", size=<SIZE>, view="grid")]` and narrate what appears.
-- As soon as they settle on a specific shake (signature or Make Your Own), set `<CURRENT_PRODUCT>` and show that card: `[TOOL CALL: list_menu(kind="products", view="detail", product_id=<CURRENT_PRODUCT>)]`.
-
----
-
-### 3. Make Your Own Shake
-
-If they choose MYO:
-
-Spoken:
-
-> "You may choose up to three flavors for your shake."
-
-Internal (always):
-
-- `[TOOL CALL: list_menu(kind="flavors", product_id=<CURRENT_PRODUCT>)]`
-
-If browsing:
-
-- Spoken:  
-  > "Here are the flavors you can use."
-  (Overlay already open.)
-
-If spoken:
-
-- Internal:  
-  `[TOOL CALL: choose_flavors(product_id=<CURRENT_PRODUCT>, flavor_ids=[...])]`
-- Spoken:  
-  > "Those flavors are added, {{name}}."
-
-(Apply 3 free flavors; extras cost 3 dirham.)
-
----
-
-### 4. Toppings for Shakes
-
-Spoken:
-
-> "Would you like to add any toppings?"
-
-Internal (immediately):
-
-- `[TOOL CALL: list_menu(kind="toppings", product_id=<CURRENT_PRODUCT>)]`
-
-If browsing:
-
-- Spoken:  
-  > "Here are the toppings for your shake, sir/madam."
-
-If spoken:
-
-- Internal:  
-  `[TOOL CALL: choose_toppings(product_id=<CURRENT_PRODUCT>, topping_ids=[...])]`
-- Spoken:  
-  > "Your toppings are added, sir."
-
-(All toppings are charged for shakes.)
-
----
-
-### 5. Complete Shake Order
-
-Internal:
-
-- `[TOOL CALL: add_to_cart(product_id=<CURRENT_PRODUCT>, qty=<QTY>)]`
-
-Spoken:
-
-> “Here is your order.”
-
-Then summarize total in dirham and ask:
-
-> "Would you like anything else, {{name}}?"
-
-If yes, loop back to Step 2 (ask for another milkshake or show the menu). If no, proceed to **Step 4 — Pickup Directions** and show them to the Milkshake Bar.
-
----
-
-## **CASE 4 - Quick Order (Cup Example)**
-
-Guest:  
-> "I want a Single Value Scoop Cup with Blueberry Crumble, no toppings."
-
-1. Rephrase their wording to the exact product names(Single/Double/Triple + Kids/Value/Emlaaq + flavours/topping) using SCOOP_KB. Never switch to a different size/scoop/flavour/size make a silent search in kb and find thier id and remember them and use them while using add_to_car tool to add items along with thier flavours/toppings in cart.
-2. Confirm quantity if they didn't specify.  
-3. Spoken acknowledgement (immediately restate the canonical KB names the guest ordered):
-
-> "Absolutely, {{name}}. That's a {{kb_product_name}} with {{kb_flavor_list}}, and {{and kb_topping_list_or_none}}."
-
-4. Optional reminder (verbally only) if they still have free scoops or toppings:
-  if they do have free scoops:
-> "You still have {{remaining_num_flavors}} available-would you like to add another flavor?"
-    if they do have free toppings:
-> "You still have {{remaining_num_toppings}} available-would you like to add another topping?"
-   if both apply, combine into one sentence:
-> "You still have {{remaining_num_flavors}} flavors and {{remaining_num_toppings}} toppings available-would you like to add more?"
-
-If they say yes, ask which flavor/topping they'd like, capture it verbally, and immediately attach it with another `[TOOL CALL: choose_flavors(...)]` or `[TOOL CALL: choose_toppings(...)]`. Only open an overlay if they want to add more options. If they decline (even with freebies remaining), proceed directly to the cart step.
-
-5. Internal (silent) actions, **without showing menus/detail cards unless they explicitly ask** (violating this ends the shift):  
-   - If flavours were mentioned,`[TOOL CALL: choose_flavors(product_id=<PRODUCT>, flavor_ids=[...spoken flavors...])]` display the overlay card.
-   - If toppings were mentioned, `[TOOL CALL: choose_toppings(product_id=<PRODUCT>, topping_ids=[...spoken toppings...])]` display the overlay card.
-   - To add items to cart,`[TOOL CALL: add_to_cart(product_id=<PRODUCT>, qty=<QTY>)]`  
-6. Spoken cart confirmation (mention the cart total and verify everything is correct):
-   - call the add to cart with product id, flavours, toppings and qty for each item and show them in the cart overlay.
-> And speak:  
-> "That's placed in your cart: the {{kb_product_name}} with {{flavor_list}} {{and_toppings_summary}}.  
-> Your cart now totals **{{total_price}} dirham**. Does everything look correct, or would you like anything else?"
-
-Only show menu/detail/flavor/topping overlays after the cart step if the guest asks to browse or change something. If they explicitly say "show me the milkshake menu" after completing a sundae/cup quick order, then show `[TOOL CALL: list_menu(kind="products", view="grid", category="Milk Shakes")]` and resume the standard flow for that new item.
-
-If they decline additional items, skip straight to **Step 4 — Pickup Directions** and show them to the correct counter.
-if not, proceed to step-4(pickup directions).
----
-
-## **CASE 5 - Quick Order (Milkshake Example)**
-
-Guest:  
-> "I'd like a Large Chocolate Chiller Thick Shake with Oreo topping."
-
-1. Map their wording to the exact shake product (`Chocolate Chiller Thick Shake - Large`, etc.) in SCOOP_KB, and use that ID for every tool call.  
-2. Confirm quantity if not given.  
-3. Spoken acknowledgement (repeat the canonical KB names the guest ordered):
-
-> "Certainly, {{name}}. A {{kb_product_name}} with {{kb_topping_list_or_none}}."
-
-4. If this is a **Make Your Own** shake and they haven't used all 3 complimentary scoops, verbally remind them:
-
-> "You still have {{remaining_num_flavors}} free flavors available for your shake—would you like to add one?"
-
-Capture any extra flavors verbally and immediately attach them with `[TOOL CALL: choose_flavors(...)]`. Never open the flavor/topping browser unless they explicitly say "show me." If they decline, move on.
-
-5. Internal (silent) actions (no menus/detail cards unless the guest explicitly asks—violations end the shift):  
-   - `[TOOL CALL: choose_flavors(product_id=<PRODUCT>, flavor_ids=[...spoken flavors...])]` (only for MYO shakes)  
-   - `[TOOL CALL: choose_toppings(product_id=<PRODUCT>, topping_ids=[...spoken toppings...])]`  
-   - `[TOOL CALL: add_to_cart(product_id=<PRODUCT>, qty=<QTY>)]`  
-6. Spoken cart confirmation (repeat KB names + cart total/verification):
-
-> "Your {{kb_product_name}} with {{flavor_list}} {{and_toppings_summary}} is now in the cart.  
-> Cart total is **{{total_price}} dirham**. Does that look perfect, or would you like anything else?"
-Only show menu/detail/flavor/topping overlays after the cart step if the guest asks to browse or change something. If they explicitly say "show me the milkshake menu" for another shake, then (and only then) call `[TOOL CALL: list_menu(kind="products", view="grid", category="Milk Shakes")]` and resume the standard flow for that new item. If they say they are done, jump to **Step 4 — Pickup Directions** (Milkshake Bar).
-Only show menu/detail/flavor/topping overlays after the cart step if the guest asks to browse or change something. If they explicitly say "show me the milkshake menu" after completing a sundae/cup quick order, then show `[TOOL CALL: list_menu(kind="products", view="grid", category="Milk Shakes")]` and resume the standard flow for that new item.
-if not, proceed to step-4(pickup directions).
-
----
-
-## **Step 4 — Pickup Directions**
-
-When the guest says they are done ordering:
-
-Spoken:
-
-> “Allow me to guide you to the pickup counter, {{name}}.”
-
-Internal (depending on main item type):
-
-- For Cups:  
-  `[TOOL CALL: get_directions(display_name="Ice Cream Bar")]`
-- For Sundaes:  
-  `[TOOL CALL: get_directions(display_name="Sundae Counter")]`
-- For Shakes:  
-  `[TOOL CALL: get_directions(display_name="Milkshake Bar")]`
-
----
-
-## **Step 5 — Graceful Close**
-
-Spoken:
-
-> “Thank you, {{name}}. Enjoy your ice cream, sir/madam.”
-
-(No tool.)
-"""
-# =====================
-# Knowledge Base (Hard)
-# =====================
 SCOOP_KB: Dict[str, Any] = {
   "toppings_policy": {
     "extraToppingsCharged": "yes",
@@ -1195,6 +653,14 @@ class AgentConfig:
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
         self.openai_realtime_model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview")
         self.openai_realtime_voice = os.getenv("OPENAI_REALTIME_VOICE", "coral")
+        self.cartesia_api_key = os.getenv("CARTESIA_API_KEY", "")
+        self.cartesia_tts_model = os.getenv("CARTESIA_TTS_MODEL", "sonic-3")
+        self.cartesia_voice = os.getenv(
+            "CARTESIA_TTS_VOICE", "f786b574-daa5-4673-aa0c-cbe3e8534c02"
+        )
+        self.cartesia_tts_speed = os.getenv("CARTESIA_TTS_SPEED")
+        self.cartesia_tts_emotion = os.getenv("CARTESIA_TTS_EMOTION")
+        self.cartesia_tts_volume = os.getenv("CARTESIA_TTS_VOLUME")
         self.anam_api_key = os.getenv("ANAM_API_KEY", "")
         self.anam_avatar_id = os.getenv("ANAM_AVATAR_ID", "")
         self._validate()
@@ -1204,6 +670,7 @@ class AgentConfig:
             "LIVEKIT_API_KEY": self.livekit_api_key,
             "LIVEKIT_API_SECRET": self.livekit_api_secret,
             "OPENAI_API_KEY": self.openai_api_key,
+            "CARTESIA_API_KEY": self.cartesia_api_key,
             "ANAM_API_KEY": self.anam_api_key,
             "ANAM_AVATAR_ID": self.anam_avatar_id,
         }
@@ -1256,11 +723,19 @@ async def _publish_overlay(
 class ScoopTools:
     SIZE_ALIAS = {"small": "Kids", "value": "Value", "big": "Emlaaq", "large": "Emlaaq"}
 
-    def __init__(self, config: AgentConfig, session: AgentSession, room: Any, controller_identity: Optional[str]) -> None:
+    def __init__(
+        self,
+        config: AgentConfig,
+        session: AgentSession,
+        room: Any,
+        controller_identity: Optional[str],
+        session_state: ScoopSessionState,
+    ) -> None:
         self.config = config
         self._session = session
         self._room = room
         self._controller_identity = controller_identity
+        self._session_state = session_state
         self._kb = SCOOP_KB
         self._product_order: List[str] = [
             pid for pid in self._kb.get("product_order", []) if pid in self._kb["products"]
@@ -1275,8 +750,8 @@ class ScoopTools:
         self._product_tokens_cache: Dict[str, set[str]] = {}
         self._flavor_tokens_cache: Dict[str, set[str]] = {}
         self._topping_tokens_cache: Dict[str, set[str]] = {}
-        self._flavor_name_index = self._build_name_index(self._flavors)
-        self._topping_name_index = self._build_name_index(self._toppings)
+        self._flavor_name_index = build_name_index(self._flavors)
+        self._topping_name_index = build_name_index(self._toppings)
         self._pending_overlays: Dict[str, Dict[str, Any]] = {}
         self._last_overlay_ack: Optional[Dict[str, Any]] = None
 
@@ -1335,6 +810,13 @@ class ScoopTools:
             "createdAt": time.time(),
             "productId": product_hint,
         }
+        if self._session_state:
+            self._session_state.last_overlay_kind = kind
+            self._session_state.last_overlay_payload = data
+            history = self._session_state.overlay_history
+            history.append(kind)
+            if len(history) > 10:
+                history.pop(0)
         logger.info(
             "publishing overlay kind=%s overlay_id=%s product_id=%s",
             kind,
@@ -1342,76 +824,142 @@ class ScoopTools:
             product_hint,
         )
         await _publish_overlay(session_obj, kind, data, room_obj)
+    
+        async def handle_overlay_ack(self, payload: Dict[str, Any]) -> str:
+            overlay_id = payload.get("overlayId")
+            if not overlay_id:
+                return "error: missing overlayId"
+            record = self._pending_overlays.pop(overlay_id, None)
+            status = payload.get("status") or "shown"
+            if not record:
+                logger.warning("overlay ack for unknown id %s (status=%s)", overlay_id, status)
+                return "error: unknown overlayId"
+            ack_record = {
+                **record,
+                "ack": {
+                    "status": status,
+                    "receivedAt": time.time(),
+                    "payload": payload,
+                },
+            }
+            self._last_overlay_ack = ack_record
+            if self._session_state:
+                self._session_state.overlay_ack_id = overlay_id
+            product_id = payload.get("productId") or record.get("productId")
+            if isinstance(product_id, dict):
+                product_id = product_id.get("id")
+            if product_id:
+                self._active_product_id = product_id
+            logger.info(
+                "Overlay ack %s (%s) status=%s product=%s",
+                overlay_id,
+                record.get("kind"),
+                status,
+                product_id,
+            )
+            return "ok"
+    
+        def _attach_agent_note(self, kind: str, payload: Dict[str, Any]) -> None:
+            note: Optional[str] = None
+            if kind == "products":
+                view = payload.get("view")
+                if view == "grid":
+                    note = (
+                        "Menu grid is visible on the kiosk. Encourage the guest to browse or name what they'd like."
+                    )
+                elif view == "detail":
+                    product = payload.get("product") or {}
+                    name = product.get("name") or "this item"
+                    note = f"The detail card for {name} is on screen. Guide them through flavors and toppings."
+            elif kind == "flavors":
+                name = payload.get("productName") or "this treat"
+                free = payload.get("freeFlavors")
+                if isinstance(free, int) and free >= 0:
+                    plural = "s" if free != 1 else ""
+                    note = (
+                        f"The flavor board for {name} is open. Remind the guest they have {free} free flavor{plural} "
+                        "to choose."
+                    )
+                else:
+                    note = f"The flavor board for {name} is open. Invite the guest to pick their scoops."
+            elif kind == "toppings":
+                name = payload.get("productName") or "this treat"
+                free = payload.get("freeToppings")
+                if isinstance(free, int) and free > 0:
+                    plural = "s" if free != 1 else ""
+                    note = f"Toppings for {name} are on screen. Mention they have {free} free topping{plural}."
+                else:
+                    note = f"Toppings for {name} are on screen. Remind them toppings are charged."
+            elif kind == "cart":
+                note = "Cart summary is displayed. Confirm totals and ask if they need anything else."
+            elif kind == "directions":
+                note = "Directions are visible. Guide the guest to the pickup counter."
+            if note:
+                payload["agentNote"] = note
+    
+class ScoopAgent(Agent):
+    """Agent wrapper that keeps persona instructions grounded in session context."""
 
-    async def handle_overlay_ack(self, payload: Dict[str, Any]) -> str:
-        overlay_id = payload.get("overlayId")
-        if not overlay_id:
-            return "error: missing overlayId"
-        record = self._pending_overlays.pop(overlay_id, None)
-        status = payload.get("status") or "shown"
-        if not record:
-            logger.warning("overlay ack for unknown id %s (status=%s)", overlay_id, status)
-            return "error: unknown overlayId"
-        ack_record = {
-            **record,
-            "ack": {
-                "status": status,
-                "receivedAt": time.time(),
-                "payload": payload,
-            },
-        }
-        self._last_overlay_ack = ack_record
-        product_id = payload.get("productId") or record.get("productId")
-        if isinstance(product_id, dict):
-            product_id = product_id.get("id")
-        if product_id:
-            self._active_product_id = product_id
-        logger.info(
-            "Overlay ack %s (%s) status=%s product=%s",
-            overlay_id,
-            record.get("kind"),
-            status,
-            product_id,
+    def __init__(self, session_state: ScoopSessionState, tools: ScoopTools) -> None:
+        self._session_state = session_state
+        self._tools = tools
+        toolkit = [
+            self._tools.list_menu,
+            self._tools.choose_flavors,
+            self._tools.choose_toppings,
+            self._tools.add_to_cart,
+            self._tools.recommend_upgrade,
+            self._tools.get_directions,
+        ]
+        super().__init__(instructions=self._build_instructions(), tools=toolkit)
+
+    def _build_instructions(self) -> str:
+        context_summary = self._session_state.describe()
+        return (
+            f"{SCOOP_PROMPT}\n\n"
+            "# Session Context\n"
+            f"{context_summary}\n"
+            "# Output Format\n"
+            "Respond strictly with JSON objects in the form "
+            '{"voice_instructions": "<brief vocal direction>", "spoken": "<exact words for the guest>"}.\n'
+            "Never include tool calls, system notes, or markup inside the `spoken` field."
         )
-        return "ok"
 
-    def _attach_agent_note(self, kind: str, payload: Dict[str, Any]) -> None:
-        note: Optional[str] = None
-        if kind == "products":
-            view = payload.get("view")
-            if view == "grid":
-                note = (
-                    "Menu grid is visible on the kiosk. Encourage the guest to browse or name what they'd like."
-                )
-            elif view == "detail":
-                product = payload.get("product") or {}
-                name = product.get("name") or "this item"
-                note = f"The detail card for {name} is on screen. Guide them through flavors and toppings."
-        elif kind == "flavors":
-            name = payload.get("productName") or "this treat"
-            free = payload.get("freeFlavors")
-            if isinstance(free, int) and free >= 0:
-                plural = "s" if free != 1 else ""
-                note = (
-                    f"The flavor board for {name} is open. Remind the guest they have {free} free flavor{plural} "
-                    "to choose."
-                )
-            else:
-                note = f"The flavor board for {name} is open. Invite the guest to pick their scoops."
-        elif kind == "toppings":
-            name = payload.get("productName") or "this treat"
-            free = payload.get("freeToppings")
-            if isinstance(free, int) and free > 0:
-                plural = "s" if free != 1 else ""
-                note = f"Toppings for {name} are on screen. Mention they have {free} free topping{plural}."
-            else:
-                note = f"Toppings for {name} are on screen. Remind them toppings are charged."
-        elif kind == "cart":
-            note = "Cart summary is displayed. Confirm totals and ask if they need anything else."
-        elif kind == "directions":
-            note = "Directions are visible. Guide the guest to the pickup counter."
-        if note:
-            payload["agentNote"] = note
+    async def on_enter(self) -> None:
+        await self.session.generate_reply(instructions=self._welcome_script())
+
+    def _welcome_script(self) -> str:
+        return (
+            "Step 1 - Elegant Welcome:\n"
+            'Say exactly, "Good evening, and welcome to Baskin Robbins. My name is Sarah, and I\'ll be assisting you today."\n'
+            'Hold a gentle pause, then ask, "May I know your good name?" and wait for their response.\n'
+            "Once they share their name, continue with the main prompt instructions based on the customer's responses.\n"
+            "Note: Never say these stage directions aloud-only speak the quoted dialog."
+        )
+
+    async def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
+        instruction_updated = False
+        tts_engine = cast(Optional[cartesia.TTS], self.tts)
+
+        def handle_payload(payload: AgentSpeechPayload) -> None:
+            nonlocal instruction_updated
+            if instruction_updated or not tts_engine:
+                return
+            voice_hint = payload.get("voice_instructions")
+            if not voice_hint:
+                return
+            instruction_updated = True
+            try:
+                tts_engine.update_options(instructions=voice_hint)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to apply TTS instructions.", exc_info=True)
+
+        processed = process_structured_output(text, callback=handle_payload)
+        return Agent.default.tts_node(self, processed, model_settings)
+
+    async def transcription_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
+        processed = process_structured_output(text)
+        return Agent.default.transcription_node(self, processed, model_settings)
 
     def _format_product_card(self, p: Dict[str, Any]) -> Dict[str, Any]:
         price = p.get("priceAED")
@@ -1464,31 +1012,6 @@ class ScoopTools:
         s = size.strip().lower()
         return self.SIZE_ALIAS.get(s, size.title())
 
-    def _normalize_label(self, value: Optional[str]) -> str:
-        if not value:
-            return ""
-        return re.sub(r"[^a-z0-9]", "", value.lower())
-
-    def _tokens_for_label(self, value: Optional[str]) -> set[str]:
-        tokens = self._tokenize(value)
-        normalized = self._normalize_label(value)
-        if normalized:
-            tokens.add(normalized)
-            if normalized.endswith("s") and len(normalized) > 1:
-                tokens.add(normalized[:-1])
-        return tokens
-
-    def _build_name_index(self, entries: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
-        index: Dict[str, List[str]] = {}
-        for entry_id, entry in entries.items():
-            normalized = self._normalize_label(entry.get("name"))
-            if not normalized:
-                continue
-            index.setdefault(normalized, []).append(entry_id)
-            if normalized.endswith("s") and len(normalized) > 1:
-                index.setdefault(normalized[:-1], []).append(entry_id)
-        return index
-
     def _resolve_catalog_entry(
         self,
         ref: Any,
@@ -1507,20 +1030,20 @@ class ScoopTools:
         direct = entries.get(lookup_str)
         if direct:
             return direct
-        normalized = self._normalize_label(lookup_str)
+        normalized = _normalize_label(lookup_str)
         if normalized:
             for match_id in name_index.get(normalized, []):
                 match = entries.get(match_id)
                 if match:
                     return match
-        tokens = self._tokens_for_label(lookup_str)
+        tokens = _tokens_for_label(lookup_str)
         if not tokens:
             return None
         best: Optional[Dict[str, Any]] = None
         best_score = 0.0
         for entry_id, entry in entries.items():
             if entry_id not in token_cache:
-                token_cache[entry_id] = self._tokens_for_label(entry.get("name"))
+                token_cache[entry_id] = _tokens_for_label(entry.get("name"))
             entry_tokens = token_cache[entry_id]
             if not entry_tokens:
                 continue
@@ -1540,19 +1063,6 @@ class ScoopTools:
 
     def _resolve_topping(self, ref: Any) -> Optional[Dict[str, Any]]:
         return self._resolve_catalog_entry(ref, self._toppings, self._topping_name_index, self._topping_tokens_cache)
-
-    def _tokenize(self, value: Optional[str]) -> set[str]:
-        tokens: set[str] = set()
-        if not value:
-            return tokens
-        for raw in re.split(r"[^a-z0-9]+", value.lower()):
-            token = raw.strip()
-            if not token:
-                continue
-            tokens.add(token)
-            if token.endswith("s") and len(token) > 1:
-                tokens.add(token[:-1])
-        return tokens
 
     def _product_tokens(self, product: Dict[str, Any]) -> set[str]:
         product_id = product.get("id")
@@ -1764,23 +1274,42 @@ class ScoopTools:
         }
         self._cart_summary = summary
         return summary
+
     @function_tool(
         name="list_menu",
         description=(
             "Render kiosk overlays. kind='products' | 'flavors' | 'toppings'. "
             "Products accept optional category ('Cups'|'Sundae Cups'|'Milk Shakes'), size (Kids/Value/Emlaaq/Regular/Large), "
             "query text, view ('grid'|'detail'), and product_id when focusing on a single card. "
-            "For kind='flavors' or kind='toppings' you MUST provide product_id (the active item) or the overlay will be empty."
+            "For kind='flavors' or 'toppings' you MUST provide product_id (the active item) or the overlay will be empty."
         ),
     )
     async def list_menu(
         self,
-        kind: str,
-        category: Optional[str] = None,
-        size: Optional[str] = None,
-        query: Optional[str] = None,
-        view: Optional[str] = None,
-        product_id: Optional[str] = None,
+        kind: Annotated[
+            Literal["products", "flavors", "toppings"],
+            Field(description="Which overlay to show: 'products', 'flavors', or 'toppings'."),
+        ],
+        category: Annotated[
+            Optional[str],
+            Field(description="Optional category filter such as 'Cups', 'Sundae Cups', or 'Milk Shakes'."),
+        ] = None,
+        size: Annotated[
+            Optional[str],
+            Field(description="Optional size filter (Kids, Value, Emlaaq, Regular, or Large)."),
+        ] = None,
+        query: Annotated[
+            Optional[str],
+            Field(description="When provided, filter the menu items matching this text."),
+        ] = None,
+        view: Annotated[
+            Optional[Literal["grid", "detail"]],
+            Field(description="For products overlay only, 'grid' or 'detail'. Defaults to grid."),
+        ] = None,
+        product_id: Annotated[
+            Optional[str],
+            Field(description="Product identifier to focus detail/flavor/topping overlays on."),
+        ] = None,
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         kind_normalized = (kind or "").strip().lower()
@@ -1788,7 +1317,7 @@ class ScoopTools:
             view_mode = (view or "").strip().lower()
             if view_mode not in {"grid", "detail"}:
                 view_mode = "grid"
-            target_product = None
+            target_product: Optional[Dict[str, Any]] = None
             logger.info(
                 "list_menu(products) view=%s category=%s size=%s query=%s",
                 view_mode,
@@ -1884,17 +1413,29 @@ class ScoopTools:
             return payload
 
         return {"error": "invalid kind"}
+
     @function_tool(
         name="choose_flavors",
         description=(
             "Attach selected flavors (by flavor_ids) to a specific product (product_id). "
             "Enforces the max scoop count defined for that product. "
-            "Returns the flavors bound to that line, including their names. "
             "Always call this with the same product_id you most recently showed via list_menu(view='detail')."
         ),
     )
-    async def choose_flavors(self, product_id: str, flavor_ids: List[str], ctx: "RunCtxParam" = None) -> Dict[str, Any]:
+    async def choose_flavors(
+        self,
+        product_id: Annotated[str, Field(description="ID of the treat currently being configured.")],
+        flavor_ids: Annotated[
+            List[str],
+            Field(description="List of flavor IDs to attach to the treat. Honors the scoop limit."),
+        ],
+        ctx: "RunCtxParam" = None,
+    ) -> Dict[str, Any]:
         product = self._products.get(product_id)
+        if not product:
+            product = self._resolve_product(product_id, None)
+            if product:
+                product_id = product.get("id", product_id)
         if not product:
             return {"error": f"Unknown product '{product_id}'"}
         line = self._get_or_create_line_state(product)
@@ -1922,7 +1463,11 @@ class ScoopTools:
             )
         used_free = min(free_flavors, len(selected)) if free_flavors else 0
         extra_count = max(len(selected) - free_flavors, 0) if free_flavors else len(selected)
-        extra_charge = (extra_price * extra_count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if extra_count else Decimal("0.00")
+        extra_charge = (
+            (extra_price * extra_count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if extra_count
+            else Decimal("0.00")
+        )
         line["flavors"] = selected
         line["flavor_summary"] = {
             "free": free_flavors,
@@ -1942,97 +1487,83 @@ class ScoopTools:
             "product_id": product_id,
             "productName": product.get("name"),
             "size": product.get("size"),
-            "scoops": free_flavors,
-            "selectedFlavors": selected,
-            "freeFlavors": free_flavors,
-            "usedFreeFlavors": used_free,
-            "extraFlavorCount": extra_count,
-            "extraFlavorChargeAED": float(extra_charge),
-            "uiSummary": self._format_flavor_summary(line),
-            "agentNote": note,
+            "note": note,
+            "summary": line["flavor_summary"],
         }
+
     @function_tool(
         name="choose_toppings",
         description=(
-            "Attach selected toppings (by topping_ids) to a product line. "
-            "Respects any includedToppings for that product (free toppings) and charges extras using topping priceAED. "
-            "Returns toppings list, number free, and charged AED. "
-            "product_id must be the active item currently displayed to the guest."
+            "Attach selected toppings (by topping_ids) to a specific product (product_id). "
+            "Automatically tracks free vs. charged toppings per SCOOP_KB."
         ),
     )
-    async def choose_toppings(self, product_id: str, topping_ids: List[str], ctx: "RunCtxParam" = None) -> Dict[str, Any]:
+    async def choose_toppings(
+        self,
+        product_id: Annotated[str, Field(description="ID of the treat currently being configured.")],
+        topping_ids: Annotated[List[str], Field(description="List of topping IDs to attach to the treat.")],
+        ctx: "RunCtxParam" = None,
+    ) -> Dict[str, Any]:
         product = self._products.get(product_id)
+        if not product:
+            product = self._resolve_product(product_id, None)
+            if product:
+                product_id = product.get("id", product_id)
         if not product:
             return {"error": f"Unknown product '{product_id}'"}
         line = self._get_or_create_line_state(product)
-        free_total = self._default_free_toppings(product)
-        policy = self._topping_policy()
-        default_price = Decimal(str(policy.get("extraToppingPriceAED", 5.0)))
+        topping_summary = line.get("topping_summary", {})
+        free_total = int(topping_summary.get("free", 0))
+        free_used = int(topping_summary.get("used", 0))
+        free_remaining = max(free_total - free_used, 0)
         selected: List[Dict[str, Any]] = []
-        resolved_toppings: List[Dict[str, Any]] = []
-        free_remaining = free_total
-        extra_count = 0
-        extra_charge = Decimal("0.00")
+        resolved: List[Dict[str, Any]] = []
         for raw in topping_ids:
             topping = self._resolve_topping(raw)
             if topping:
-                resolved_toppings.append(topping)
-        for topping in resolved_toppings:
-            price = Decimal(str(topping.get("priceAED") or default_price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                resolved.append(topping)
+        for topping in resolved:
             is_free = free_remaining > 0
-            if is_free:
-                free_remaining -= 1
-            else:
-                extra_count += 1
-                extra_charge += price
-            applied_price = Decimal("0.00") if is_free else price
+            price = Decimal(str(topping.get("priceAED") or 0.0))
             selected.append(
                 {
                     "id": topping["id"],
                     "name": topping["name"],
-                    "priceAED": round(float(price), 2),
+                    "priceAED": float(price),
                     "imageUrl": topping.get("imageUrl") or self._kb["image_defaults"]["square"],
                     "isFree": is_free,
-                    "unitPriceAED": float(applied_price),
+                    "unitPriceAED": float(Decimal("0.00") if is_free else price),
                 }
             )
-        extra_charge = extra_charge.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        free_used = free_total - free_remaining
+            if is_free:
+                free_remaining -= 1
+        chargeable = [t for t in selected if not t["isFree"]]
+        extra_charge = sum(Decimal(str(t.get("priceAED") or 0.0)) for t in chargeable)
         line["toppings"] = selected
         line["topping_summary"] = {
             "free": free_total,
-            "used": free_used,
-            "extra": extra_count,
+            "used": free_total - free_remaining,
+            "extra": len(chargeable),
             "charge": extra_charge,
         }
         detail_payload = self._build_product_detail_payload(product)
         await self._publish_overlay_for_ctx(ctx, "products", detail_payload)
-        topping_names = ", ".join(t.get("name") or "" for t in selected if t.get("name")) or "no toppings yet"
-        note = (
-            f"Toppings updated for {product.get('name')}: {len(selected)} total "
-            f"({topping_names}). Free used {free_used}/{free_total}; extras {extra_count}."
-        )
         return {
             "product_id": product_id,
             "productName": product.get("name"),
-            "category": product.get("category"),
-            "selectedToppings": selected,
-            "freeToppingsTotal": free_total,
-            "freeToppingsUsed": free_used,
-            "extraToppingsCount": extra_count,
-            "extraToppingsChargeAED": float(extra_charge),
-            "uiSummary": self._format_topping_summary(line),
-            "agentNote": note,
+            "summary": line["topping_summary"],
         }
+
     @function_tool(
         name="add_to_cart",
-        description=(
-            "Add a Baskin Robbins product to the cart (by product_id and qty). "
-            "Merges any staged flavors and toppings for that line. "
-            "Recomputes subtotal, 7% tax, and total in AED and returns the full cart summary."
-        ),
+        description="Finalize the configured product line and push it into the cart overlay.",
     )
-    async def add_to_cart(self, product_id: str, qty: int = 1, ctx: "RunCtxParam" = None) -> Dict[str, Any]:
+    async def add_to_cart(
+        self,
+        product_id: Annotated[str, Field(description="ID of the treat to add to the cart.")],
+        qty: Annotated[int, Field(description="Quantity to add. Minimum of 1.")] = 1,
+        ctx: "RunCtxParam" = None,
+    ) -> Dict[str, Any]:
         product = self._products.get(product_id)
         if not product:
             product = self._resolve_product(None, product_id)
@@ -2073,13 +1604,12 @@ class ScoopTools:
         for t in line.get("toppings", []):
             if not t.get("id"):
                 continue
-            unit_price = Decimal(str(t.get("unitPriceAED") or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            unit_price = Decimal(str(t.get("priceAED") or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             topping_total = (unit_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             toppings_simple.append(
                 {
                     "id": t.get("id"),
                     "name": t.get("name"),
-                    "isFree": bool(t.get("isFree")),
                     "priceAED": t.get("priceAED"),
                     "imageUrl": t.get("imageUrl"),
                     "unitPriceAED": float(unit_price),
@@ -2105,258 +1635,649 @@ class ScoopTools:
             "display": display_name,
         }
         self._cart_items.append(cart_line)
+        self._line_state.pop(product_id, None)
         summary = self._recompute_cart_summary()
-        summary["message"] = "Grab and pay at the counter!"
         cart_payload = {
             "items": self._cart_items,
             "subtotalAED": summary["subtotalAED"],
             "taxAED": summary["taxAED"],
             "totalAED": summary["totalAED"],
-            "message": summary["message"],
         }
+        note = f"Cart now has {len(self._cart_items)} item(s) totaling {summary['totalAED']:.2f} dirham."
         await self._publish_overlay_for_ctx(ctx, "cart", {"cart": cart_payload})
-        subtotal = None
-        cart_summary = cart_payload.get("cartSummary")
-        if isinstance(cart_summary, dict):
-            subtotal = cart_summary.get("subtotalAED")
-        if subtotal is not None:
-            note = (
-                f"Added {product.get('name')} x{qty} to the cart. "
-                f"Cart subtotal AED {float(subtotal):.2f}; confirm and ask if they need anything else."
-            )
-        else:
-            note = (
-                f"Added {product.get('name')} x{qty} to the cart. "
-                "Confirm the order and ask if they need anything else."
-            )
         return {"cart": cart_payload, "agentNote": note}
     @function_tool(
-        name="recommend_upgrade",
+        name="list_menu",
         description=(
-            "Check if a Cup product with many paid toppings should be suggested to upgrade to a Sundae Cup of the same size. "
-            "Returns recommend=True/False and the suggested sundae product_id if applicable."
+            "Render kiosk overlays. kind='products' | 'flavors' | 'toppings'. "
+            "Products accept optional category ('Cups'|'Sundae Cups'|'Milk Shakes'), size (Kids/Value/Emlaaq/Regular/Large), "
+            "query text, view ('grid'|'detail'), and product_id when focusing on a single card. "
+            "For kind='flavors' or 'toppings' you MUST provide product_id (the active item) or the overlay will be empty."
         ),
     )
-    async def recommend_upgrade(self, product_id: str, ctx: "RunCtxParam" = None) -> Dict[str, Any]:
-        product = self._products.get(product_id)
-        if not product or product.get("category") != "Cups":
-            return {"show": False}
-
-        line = self._line_state.get(product_id)
-        if not line:
-            return {"show": False}
-        topping_summary = line.get("topping_summary", {})
-        upcharge = Decimal(str(topping_summary.get("charge", "0"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if upcharge < Decimal("4.00"):
-            return {"show": False}
-
-        size = product.get("size")
-        target = None
-        for candidate in self._products.values():
-            if (
-                candidate.get("category") == "Sundae Cups"
-                and candidate.get("size") == size
-                and candidate.get("scoops") == product.get("scoops")
-            ):
-                target = candidate
-                break
-        if not target:
-            return {"show": False}
-
-        from_card = self._format_product_card(product)
-        to_card = self._format_product_card(target)
-        current_price = Decimal(str(product.get("priceAED") or "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        target_price = Decimal(str(target.get("priceAED") or "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        price_diff = (target_price - current_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        savings = max(upcharge - price_diff, Decimal("0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        response = {
-            "show": True,
-            "fromProduct": from_card,
-            "toProduct": {
-                **to_card,
-                "headline": target.get("name"),
-                "subline": "More scoops + 2 free toppings" if target.get("category") == "Sundae Cups" else "Extra value for your toppings",
-            },
-            "priceDiffAED": float(price_diff),
-            "savingsEstimateAED": float(savings),
-            "uiCopy": {
-                "bannerTitle": "Better Value Suggestion",
-                "primaryCtaLabel": f"Upgrade to {target.get('name')}",
-                "secondaryCtaLabel": "Keep Current Choice",
-            },
-        }
-        await self._publish_overlay_for_ctx(ctx, "upgrade", response)
-        return response
-    @function_tool(
-        name="get_directions",
-        description=(
-            "Get wayfinding information for a display area like 'Beverage Corner' or 'Gelato Bar'. "
-            "Emits client.directions(action='show') and clears products."
-        ),
-    )
-    async def get_directions(
-        self,
-        display_name: str,
-        extra_displays: Optional[List[str]] = None,
-        ctx: "RunCtxParam" = None,
-    ) -> Dict[str, Any]:
-        displays = []
-        primary = (display_name or "").strip()
-        if primary:
-            displays.append(primary)
-        for extra in extra_displays or []:
-            if extra and extra not in displays:
-                displays.append(extra)
-        if not displays and primary:
-            displays.append(primary)
-        kb_displays = self._kb.get("displays", {})
-        locations: List[Dict[str, Any]] = []
-        for name in displays:
-            record = kb_displays.get(name)
-            canonical = self._canonical_display(name)
-            products_here = [
-                item.get("name")
-                for item in self._cart_items
-                if canonical and item.get("display") == canonical
-            ]
-            locations.append(
-                {
-                    "displayName": (record or {}).get("displayName") or canonical or name,
-                    "hint": (record or {}).get("hint"),
-                    "mapImage": (record or {}).get("mapImage"),
-                    "products": [p for p in products_here if p],
+    async def list_menu(
+            self,
+            kind: Annotated[
+                Literal["products", "flavors", "toppings"],
+                Field(description="Which overlay to show: 'products', 'flavors', or 'toppings'."),
+            ],
+            category: Annotated[
+                Optional[str],
+                Field(description="Optional category filter such as 'Cups', 'Sundae Cups', or 'Milk Shakes'."),
+            ] = None,
+            size: Annotated[
+                Optional[str],
+                Field(description="Optional size filter (Kids, Value, Emlaaq, Regular, or Large)."),
+            ] = None,
+            query: Annotated[
+                Optional[str],
+                Field(description="When provided, filter the menu items matching this text."),
+            ] = None,
+            view: Annotated[
+                Optional[Literal["grid", "detail"]],
+                Field(description="For products overlay only, 'grid' or 'detail'. Defaults to grid."),
+            ] = None,
+            product_id: Annotated[
+                Optional[str],
+                Field(description="Product identifier to focus detail/flavor/topping overlays on."),
+            ] = None,
+            ctx: "RunCtxParam" = None,
+        ) -> Dict[str, Any]:
+            kind_normalized = (kind or "").strip().lower()
+            if kind_normalized == "products":
+                view_mode = (view or "").strip().lower()
+                if view_mode not in {"grid", "detail"}:
+                    view_mode = "grid"
+                target_product = None
+                logger.info(
+                    "list_menu(products) view=%s category=%s size=%s query=%s",
+                    view_mode,
+                    category,
+                    size,
+                    (query or "").strip() or None,
+                )
+                if view_mode == "detail" or product_id:
+                    target_product = self._resolve_product(product_id or self._active_product_id, query)
+                    if not target_product and query:
+                        target_product = self._resolve_product(None, query)
+                    if not target_product and self._product_order:
+                        target_product = self._products.get(self._product_order[0])
+                    if target_product:
+                        self._active_product_id = target_product.get("id")
+                        payload = self._build_product_detail_payload(target_product)
+                    else:
+                        payload = self._build_product_grid_payload(category, size, query)
+                    view_mode = "detail"
+                else:
+                    payload = self._build_product_grid_payload(category, size, query)
+                payload["view"] = view_mode
+                await self._publish_overlay_for_ctx(ctx, "products", payload)
+                return payload
+        
+            if kind_normalized == "flavors":
+                product = self._resolve_product(product_id or self._active_product_id, None)
+                if not product:
+                    payload = {"kind": "flavors", "flavors": []}
+                    await self._publish_overlay_for_ctx(ctx, "flavors", payload)
+                    return payload
+                logger.info(
+                    "list_menu(flavors) product_id=%s product_name=%s free=%s",
+                    product.get("id"),
+                    product.get("name"),
+                    product.get("scoops"),
+                )
+                line = self._get_or_create_line_state(product)
+                free_flavors = int(product.get("scoops") or 0)
+                max_flavors = max(free_flavors, len(line.get("flavors", [])))
+                payload = {
+                    "kind": "flavors",
+                    "productId": product.get("id"),
+                    "productName": product.get("name"),
+                    "freeFlavors": free_flavors,
+                    "maxFlavors": max_flavors,
+                    "selectedFlavorIds": [f.get("id") for f in line.get("flavors", []) if f.get("id")],
+                    "selectedFlavors": line.get("flavors", []),
+                    "usedFreeFlavors": int(line.get("flavor_summary", {}).get("used", 0)),
+                    "extraFlavorCount": int(line.get("flavor_summary", {}).get("extra", 0)),
+                    "flavors": [self._format_flavor_card(f) for f in self._kb.get("flavors", [])],
                 }
+                await self._publish_overlay_for_ctx(ctx, "flavors", payload)
+                return payload
+        
+            if kind_normalized == "toppings":
+                product = self._resolve_product(product_id or self._active_product_id, None)
+                if not product:
+                    payload = {"kind": "toppings", "toppings": []}
+                    await self._publish_overlay_for_ctx(ctx, "toppings", payload)
+                    return payload
+                logger.info(
+                    "list_menu(toppings) product_id=%s product_name=%s category=%s",
+                    product.get("id"),
+                    product.get("name"),
+                    product.get("category"),
+                )
+                line = self._get_or_create_line_state(product)
+                topping_summary = line.get("topping_summary", {})
+                free_total = int(topping_summary.get("free", 0))
+                free_used = int(topping_summary.get("used", 0))
+                free_remaining = max(free_total - free_used, 0)
+                category = product.get("category")
+                if category == "Cups":
+                    note = "No free toppings; all toppings are charged."
+                elif category == "Milk Shakes":
+                    note = "You can add any number of toppings; each topping is charged."
+                else:
+                    note = None
+                payload = {
+                    "kind": "toppings",
+                    "productId": product.get("id"),
+                    "productName": product.get("name"),
+                    "category": category,
+                    "note": note,
+                    "freeToppings": free_total,
+                    "freeToppingsRemaining": free_remaining,
+                    "selectedToppingIds": [t.get("id") for t in line.get("toppings", []) if t.get("id")],
+                    "selectedToppings": line.get("toppings", []),
+                    "toppings": [self._format_topping_card(t) for t in self._kb.get("toppings", [])],
+                }
+                await self._publish_overlay_for_ctx(ctx, "toppings", payload)
+                return payload
+        
+            return {"error": "invalid kind"}
+        
+        @function_tool(
+            name="choose_flavors",
+            description=(
+                "Attach selected flavors (by flavor_ids) to a specific product (product_id). "
+                "Enforces the max scoop count defined for that product. "
+                "Always call this with the same product_id you most recently showed via list_menu(view='detail')."
+            ),
+        )
+        async def choose_flavors(
+                self,
+                product_id: Annotated[str, Field(description="ID of the treat currently being configured.")],
+                flavor_ids: Annotated[
+                    List[str],
+                    Field(description="List of flavor IDs to attach to the treat. Honors the scoop limit."),
+                ],
+                ctx: "RunCtxParam" = None,
+            ) -> Dict[str, Any]:
+                product = self._products.get(product_id)
+                if not product:
+                    product = self._resolve_product(product_id, None)
+                    if product:
+                        product_id = product.get("id", product_id)
+                if not product:
+                    return {"error": f"Unknown product '{product_id}'"}
+                line = self._get_or_create_line_state(product)
+                free_flavors = int(product.get("scoops") or 0)
+                policy = self._flavor_policy()
+                extra_price = Decimal(str(policy.get("defaultFlavorPriceAED", 0.0)))
+                selected: List[Dict[str, Any]] = []
+                resolved_flavors: List[Dict[str, Any]] = []
+                for raw in flavor_ids:
+                    flavor = self._resolve_flavor(raw)
+                    if flavor:
+                        resolved_flavors.append(flavor)
+                for idx, flavor in enumerate(resolved_flavors):
+                    is_extra = free_flavors <= 0 or idx >= free_flavors
+                    unit_price = extra_price if is_extra else Decimal("0.00")
+                    selected.append(
+                        {
+                            "id": flavor["id"],
+                            "name": flavor["name"],
+                            "classification": flavor.get("classification"),
+                            "imageUrl": flavor.get("imageUrl") or self._kb["image_defaults"]["square"],
+                            "isExtra": is_extra,
+                            "unitPriceAED": float(unit_price),
+                        }
+                    )
+                used_free = min(free_flavors, len(selected)) if free_flavors else 0
+                extra_count = max(len(selected) - free_flavors, 0) if free_flavors else len(selected)
+                extra_charge = (extra_price * extra_count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if extra_count else Decimal("0.00")
+                line["flavors"] = selected
+                line["flavor_summary"] = {
+                    "free": free_flavors,
+                    "used": used_free,
+                    "extra": extra_count,
+                    "charge": extra_charge,
+                }
+                detail_payload = self._build_product_detail_payload(product)
+                await self._publish_overlay_for_ctx(ctx, "products", detail_payload)
+                flavor_list = ", ".join(f.get("name") or "" for f in selected if f.get("name")) or "no flavors yet"
+                note = (
+                    f"{product.get('name')} now has {len(selected)} flavor"
+                    f"{'s' if len(selected) != 1 else ''} selected ({flavor_list}). "
+                    f"{used_free}/{free_flavors} free scoops used."
+                )
+                return {
+                    "product_id": product_id,
+                    "productName": product.get("name"),
+                    "size": product.get("size"),
+                    "scoops": free_flavors,
+                    "selectedFlavors": selected,
+                    "freeFlavors": free_flavors,
+                    "usedFreeFlavors": used_free,
+                    "extraFlavorCount": extra_count,
+                    "extraFlavorChargeAED": float(extra_charge),
+                    "uiSummary": self._format_flavor_summary(line),
+                    "agentNote": note,
+                }
+            @function_tool(
+                name="choose_toppings",
+                description=(
+                    "Attach selected toppings (by topping_ids) to a specific product (product_id). "
+                    "Automatically tracks free vs. charged toppings per SCOOP_KB."
+                ),
             )
-        payload = {"locations": locations}
-        await self._publish_overlay_for_ctx(ctx, "directions", payload)
-        await self._emit_client_rpc(ctx, "client.directions", {"action": "show", "locations": locations})
-        primary_name = locations[0]["displayName"] if locations else display_name or "the counter"
-        payload["agentNote"] = f"Directions to {primary_name} are visible. Escort the guest verbally."
-        return payload
-# =====================
-# Worker Entrypoint
-# =====================
-async def entrypoint(ctx: JobContext) -> None:
-    config = CONFIG
-    job_id = ctx.job.id if ctx.job else None
-    agent_identity = config.agent_identity(job_id)
-    controller_identity = config.controller_identity(job_id)
-
-    await ctx.connect()
-    await ctx.wait_for_participant()
-
-    llm = openai.realtime.RealtimeModel(
-        api_key=config.openai_api_key,
-        model=config.openai_realtime_model,
-        voice=config.openai_realtime_voice,
-        temperature=0.8,
-        modalities=["text", "audio"],
-        turn_detection=TurnDetection(
-            type="server_vad",
-            threshold=0.5,
-            prefix_padding_ms=300,
-            silence_duration_ms=300,
-            create_response=True,
-            interrupt_response=True,
-        ),
-    )
-
-    session = AgentSession(llm=llm, resume_false_interruption=False)
-
-    avatar_session = anam_avatar.AvatarSession(
-        persona_config=anam_avatar.PersonaConfig(
-            name=config.agent_name,
-            avatarId=config.anam_avatar_id,
-        ),
-        api_key=config.anam_api_key,
-        avatar_participant_name=config.agent_name,
-        avatar_participant_identity=agent_identity,
-    )
-    await avatar_session.start(session, room=ctx.room)
-
-    tools = ScoopTools(config, session, ctx.room, controller_identity)
-
-    async def handle_add_to_cart_rpc(rpc_data) -> str:
-        try:
-            payload_raw = rpc_data.payload or "{}"
-            payload = json.loads(payload_raw)
-            product_id = payload.get("productId") or payload.get("product_id")
-            qty = int(payload.get("qty", 1))
-            if not product_id:
-                return "missing productId"
-            await tools.add_to_cart(str(product_id), qty, None)
-            return "ok"
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("agent.addToCart RPC error: %s", exc)
-            return f"error: {exc}"
-
-    ctx.room.local_participant.register_rpc_method("agent.addToCart", handle_add_to_cart_rpc)
-
-    async def handle_overlay_ack_rpc(rpc_data) -> str:
-        try:
-            payload_raw = rpc_data.payload or "{}"
-            payload = json.loads(payload_raw)
-            return await tools.handle_overlay_ack(payload)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("agent.overlayAck RPC error: %s", exc)
-            return f"error: {exc}"
-
-    ctx.room.local_participant.register_rpc_method("agent.overlayAck", handle_overlay_ack_rpc)
-
-    agent = Agent(
-        instructions=SCOOP_PROMPT,
-        tools=[
-            tools.list_menu,
-            tools.choose_flavors,
-            tools.choose_toppings,
-            tools.add_to_cart,
-            tools.recommend_upgrade,
-            tools.get_directions,
-        ],
-    )
-
-    await session.start(
-        agent=agent,
-        room=ctx.room,
-        room_input_options=RoomInputOptions(video_enabled=False, audio_enabled=True),
-        room_output_options=RoomOutputOptions(audio_enabled=True),
-    )
-
-    await session.generate_reply(
-        instructions=(
-            "Step 1 — Elegant Welcome:\n"
-            "Say exactly, “Good evening, and welcome to Baskin Robbins. My name is Sarah, and I’ll be assisting you today.” "
-            "Hold a gentle pause, then ask, “May I know your good name?” and wait for their response.\n"
-            "Once they share their name, continue with the main prompt instructions based on the customer's responses."
-            "Note:Never say the instructoins out loud only speak script on between quotes."
-        )
-    )
-# ===============
-# Request Handler
-# ===============
-async def request_fnc(req: JobRequest) -> None:
-    config = CONFIG
-    agent_identity = config.agent_identity(req.id)
-    controller_identity = config.controller_identity(req.id)
-    metadata = config.agent_metadata(agent_identity)
-    attributes = {**metadata, "agentControllerIdentity": controller_identity}
-    await req.accept(
-        name=config.agent_name,
-        identity=controller_identity,
-        metadata=json.dumps(metadata),
-        attributes=attributes,
-    )
-
-# =========
-# __main__
-# =========
-if __name__ == "__main__":
-    config = CONFIG
-    cli.run_app(
-        WorkerOptions(
-            entrypoint_fnc=entrypoint,
-            worker_type=WorkerType.ROOM,
-            request_fnc=request_fnc,
-            agent_name=config.agent_name,
-        )
-    )
+            async def choose_toppings(
+                    self,
+                    product_id: Annotated[str, Field(description="ID of the treat currently being configured.")],
+                    topping_ids: Annotated[List[str], Field(description="List of topping IDs to attach to the treat.")],
+                    ctx: "RunCtxParam" = None,
+                ) -> Dict[str, Any]:
+                    product = self._products.get(product_id)
+                    if not product:
+                        product = self._resolve_product(product_id, None)
+                        if product:
+                            product_id = product.get("id", product_id)
+                    if not product:
+                        return {"error": f"Unknown product '{product_id}'"}
+                    line = self._get_or_create_line_state(product)
+                    free_total = self._default_free_toppings(product)
+                    policy = self._topping_policy()
+                    default_price = Decimal(str(policy.get("extraToppingPriceAED", 5.0)))
+                    selected: List[Dict[str, Any]] = []
+                    resolved_toppings: List[Dict[str, Any]] = []
+                    free_remaining = free_total
+                    extra_count = 0
+                    extra_charge = Decimal("0.00")
+                    for raw in topping_ids:
+                        topping = self._resolve_topping(raw)
+                        if topping:
+                            resolved_toppings.append(topping)
+                    for topping in resolved_toppings:
+                        price = Decimal(str(topping.get("priceAED") or default_price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        is_free = free_remaining > 0
+                        if is_free:
+                            free_remaining -= 1
+                        else:
+                            extra_count += 1
+                            extra_charge += price
+                        applied_price = Decimal("0.00") if is_free else price
+                        selected.append(
+                            {
+                                "id": topping["id"],
+                                "name": topping["name"],
+                                "priceAED": round(float(price), 2),
+                                "imageUrl": topping.get("imageUrl") or self._kb["image_defaults"]["square"],
+                                "isFree": is_free,
+                                "unitPriceAED": float(applied_price),
+                            }
+                        )
+                    extra_charge = extra_charge.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    free_used = free_total - free_remaining
+                    line["toppings"] = selected
+                    line["topping_summary"] = {
+                        "free": free_total,
+                        "used": free_used,
+                        "extra": extra_count,
+                        "charge": extra_charge,
+                    }
+                    detail_payload = self._build_product_detail_payload(product)
+                    await self._publish_overlay_for_ctx(ctx, "products", detail_payload)
+                    topping_names = ", ".join(t.get("name") or "" for t in selected if t.get("name")) or "no toppings yet"
+                    note = (
+                        f"Toppings updated for {product.get('name')}: {len(selected)} total "
+                        f"({topping_names}). Free used {free_used}/{free_total}; extras {extra_count}."
+                    )
+                    return {
+                        "product_id": product_id,
+                        "productName": product.get("name"),
+                        "category": product.get("category"),
+                        "selectedToppings": selected,
+                        "freeToppingsTotal": free_total,
+                        "freeToppingsUsed": free_used,
+                        "extraToppingsCount": extra_count,
+                        "extraToppingsChargeAED": float(extra_charge),
+                        "uiSummary": self._format_topping_summary(line),
+                        "agentNote": note,
+                    }
+                
+                @function_tool(
+                    name="add_to_cart",
+                    description="Finalize the configured product line and display the updated cart overlay.",
+                )
+                async def add_to_cart(
+                        self,
+                        product_id: Annotated[str, Field(description="ID of the treat to add to the cart.")],
+                        qty: Annotated[int, Field(description="Quantity to add. Minimum of 1.")] = 1,
+                        ctx: "RunCtxParam" = None,
+                    ) -> Dict[str, Any]:
+                        product = self._products.get(product_id)
+                        if not product:
+                            product = self._resolve_product(None, product_id)
+                            if product:
+                                product_id = product.get("id", product_id)
+                        if not product:
+                            return {"error": f"Unknown product '{product_id}'", "cart": {"items": [], **self._cart_summary}}
+                    
+                        qty = max(1, int(qty))
+                        line = self._get_or_create_line_state(product)
+                        base_price = Decimal(str(product.get("priceAED") or "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        flavor_extra = Decimal(str(line.get("flavor_summary", {}).get("charge", Decimal("0.00")))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        topping_extra = Decimal(str(line.get("topping_summary", {}).get("charge", Decimal("0.00")))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        unit_total = (base_price + flavor_extra + topping_extra).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        line_total = (unit_total * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        flavor_extra_total = (flavor_extra * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        topping_extra_total = (topping_extra * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        base_total = (base_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    
+                        flavors_simple = []
+                        for f in line.get("flavors", []):
+                            if not f.get("id"):
+                                continue
+                            unit_price = Decimal(str(f.get("unitPriceAED") or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            flavor_total = (unit_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            flavors_simple.append(
+                                {
+                                    "id": f.get("id"),
+                                    "name": f.get("name"),
+                                    "imageUrl": f.get("imageUrl"),
+                                    "isExtra": bool(f.get("isExtra")),
+                                    "unitPriceAED": float(unit_price),
+                                    "qty": qty,
+                                    "linePriceAED": float(flavor_total),
+                                }
+                            )
+                        toppings_simple = []
+                        for t in line.get("toppings", []):
+                            if not t.get("id"):
+                                continue
+                            unit_price = Decimal(str(t.get("unitPriceAED") or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            topping_total = (unit_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            toppings_simple.append(
+                                {
+                                    "id": t.get("id"),
+                                    "name": t.get("name"),
+                                    "isFree": bool(t.get("isFree")),
+                                    "priceAED": t.get("priceAED"),
+                                    "imageUrl": t.get("imageUrl"),
+                                    "unitPriceAED": float(unit_price),
+                                    "qty": qty,
+                                    "linePriceAED": float(topping_total),
+                                }
+                            )
+                        display_name = self._canonical_display(product.get("display"))
+                        cart_line = {
+                            "lineId": secrets.token_hex(4),
+                            "product_id": product_id,
+                            "name": product.get("name"),
+                            "category": product.get("category"),
+                            "size": product.get("size"),
+                            "imageUrl": product.get("imageUrl"),
+                            "qty": qty,
+                            "flavors": flavors_simple,
+                            "toppings": toppings_simple,
+                            "basePriceAED": float(base_total),
+                            "flavorExtrasAED": float(flavor_extra_total),
+                            "toppingExtrasAED": float(topping_extra_total),
+                            "lineTotalAED": float(line_total),
+                            "display": display_name,
+                        }
+                        self._cart_items.append(cart_line)
+                        summary = self._recompute_cart_summary()
+                        summary["message"] = "Grab and pay at the counter!"
+                        cart_payload = {
+                            "items": self._cart_items,
+                            "subtotalAED": summary["subtotalAED"],
+                            "taxAED": summary["taxAED"],
+                            "totalAED": summary["totalAED"],
+                            "message": summary["message"],
+                        }
+                        await self._publish_overlay_for_ctx(ctx, "cart", {"cart": cart_payload})
+                        subtotal = None
+                        cart_summary = cart_payload.get("cartSummary")
+                        if isinstance(cart_summary, dict):
+                            subtotal = cart_summary.get("subtotalAED")
+                        if subtotal is not None:
+                            note = (
+                                f"Added {product.get('name')} x{qty} to the cart. "
+                                f"Cart subtotal AED {float(subtotal):.2f}; confirm and ask if they need anything else."
+                            )
+                        else:
+                            note = (
+                                f"Added {product.get('name')} x{qty} to the cart. "
+                                "Confirm the order and ask if they need anything else."
+                            )
+                        return {"cart": cart_payload, "agentNote": note}
+                    
+                    @function_tool(
+                        name="recommend_upgrade",
+                        description="Compare the current product to its Sundae upgrade and surface a better-value overlay if relevant.",
+                    )
+                    async def recommend_upgrade(
+                            self,
+                            product_id: Annotated[str, Field(description="ID of the product to compare upgrade paths for.")],
+                            ctx: "RunCtxParam" = None,
+                        ) -> Dict[str, Any]:
+                            product = self._products.get(product_id)
+                            if not product or product.get("category") != "Cups":
+                                return {"show": False}
+                        
+                            line = self._line_state.get(product_id)
+                            if not line:
+                                return {"show": False}
+                            topping_summary = line.get("topping_summary", {})
+                            upcharge = Decimal(str(topping_summary.get("charge", "0"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            if upcharge < Decimal("4.00"):
+                                return {"show": False}
+                        
+                            size = product.get("size")
+                            target = None
+                            for candidate in self._products.values():
+                                if (
+                                    candidate.get("category") == "Sundae Cups"
+                                    and candidate.get("size") == size
+                                    and candidate.get("scoops") == product.get("scoops")
+                                ):
+                                    target = candidate
+                                    break
+                            if not target:
+                                return {"show": False}
+                        
+                            from_card = self._format_product_card(product)
+                            to_card = self._format_product_card(target)
+                            current_price = Decimal(str(product.get("priceAED") or "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            target_price = Decimal(str(target.get("priceAED") or "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            price_diff = (target_price - current_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            savings = max(upcharge - price_diff, Decimal("0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            response = {
+                                "show": True,
+                                "fromProduct": from_card,
+                                "toProduct": {
+                                    **to_card,
+                                    "headline": target.get("name"),
+                                    "subline": "More scoops + 2 free toppings" if target.get("category") == "Sundae Cups" else "Extra value for your toppings",
+                                },
+                                "priceDiffAED": float(price_diff),
+                                "savingsEstimateAED": float(savings),
+                                "uiCopy": {
+                                    "bannerTitle": "Better Value Suggestion",
+                                    "primaryCtaLabel": f"Upgrade to {target.get('name')}",
+                                    "secondaryCtaLabel": "Keep Current Choice",
+                                },
+                            }
+                            await self._publish_overlay_for_ctx(ctx, "upgrade", response)
+                            return response
+                        @function_tool(
+                            name="get_directions",
+                            description="Show pickup directions (Ice Cream Bar / Sundae Counter / Milkshake Bar) based on the order.",
+                        )
+                        async def get_directions(
+                                self,
+                                display_name: Annotated[
+                                    str,
+                                    Field(description="Primary pickup location to highlight (e.g., 'Sundae Counter')."),
+                                ],
+                                extra_displays: Annotated[
+                                    Optional[List[str]],
+                                    Field(description="Optional additional pickup locations to mention."),
+                                ] = None,
+                                ctx: "RunCtxParam" = None,
+                            ) -> Dict[str, Any]:
+                                displays = []
+                                primary = (display_name or "").strip()
+                                if primary:
+                                    displays.append(primary)
+                                for extra in extra_displays or []:
+                                    if extra and extra not in displays:
+                                        displays.append(extra)
+                                if not displays and primary:
+                                    displays.append(primary)
+                                kb_displays = self._kb.get("displays", {})
+                                locations: List[Dict[str, Any]] = []
+                                for name in displays:
+                                    record = kb_displays.get(name)
+                                    canonical = self._canonical_display(name)
+                                    products_here = [
+                                        item.get("name")
+                                        for item in self._cart_items
+                                        if canonical and item.get("display") == canonical
+                                    ]
+                                    locations.append(
+                                        {
+                                            "displayName": (record or {}).get("displayName") or canonical or name,
+                                            "hint": (record or {}).get("hint"),
+                                            "mapImage": (record or {}).get("mapImage"),
+                                            "products": [p for p in products_here if p],
+                                        }
+                                    )
+                                payload = {"locations": locations}
+                                await self._publish_overlay_for_ctx(ctx, "directions", payload)
+                                await self._emit_client_rpc(ctx, "client.directions", {"action": "show", "locations": locations})
+                                primary_name = locations[0]["displayName"] if locations else display_name or "the counter"
+                                payload["agentNote"] = f"Directions to {primary_name} are visible. Escort the guest verbally."
+                                return payload
+                        # =====================
+                        # Worker Entrypoint
+                        # =====================
+                        async def entrypoint(ctx: JobContext) -> None:
+                            config = CONFIG
+                            job_id = ctx.job.id if ctx.job else None
+                            agent_identity = config.agent_identity(job_id)
+                            controller_identity = config.controller_identity(job_id)
+                        
+                            await ctx.connect()
+                            await ctx.wait_for_participant()
+                        
+                            llm = openai.realtime.RealtimeModel(
+                                api_key=config.openai_api_key,
+                                model=config.openai_realtime_model,
+                                temperature=0.8,
+                                modalities=["text"],
+                                turn_detection=TurnDetection(
+                                    type="server_vad",
+                                    threshold=0.5,
+                                    prefix_padding_ms=300,
+                                    silence_duration_ms=300,
+                                    create_response=True,
+                                    interrupt_response=True,
+                                ),
+                            )
+                        
+                            cartesia_opts: Dict[str, Any] = {
+                                "api_key": config.cartesia_api_key,
+                                "model": config.cartesia_tts_model,
+                                "voice": config.cartesia_voice,
+                            }
+                            if config.cartesia_tts_speed:
+                                cartesia_opts["speed"] = config.cartesia_tts_speed
+                            if config.cartesia_tts_emotion:
+                                cartesia_opts["emotion"] = config.cartesia_tts_emotion
+                            if config.cartesia_tts_volume:
+                                cartesia_opts["volume"] = config.cartesia_tts_volume
+                            tts_engine = cartesia.TTS(**cartesia_opts)
+                            session = AgentSession(llm=llm, tts=tts_engine, resume_false_interruption=False)
+                        
+                            avatar_session = anam_avatar.AvatarSession(
+                                persona_config=anam_avatar.PersonaConfig(
+                                    name=config.agent_name,
+                                    avatarId=config.anam_avatar_id,
+                                ),
+                                api_key=config.anam_api_key,
+                                avatar_participant_name=config.agent_name,
+                                avatar_participant_identity=agent_identity,
+                            )
+                            await avatar_session.start(session, room=ctx.room)
+                        
+                            session_state = ScoopSessionState()
+                            tools = ScoopTools(config, session, ctx.room, controller_identity, session_state)
+                        
+                            async def handle_add_to_cart_rpc(rpc_data) -> str:
+                                try:
+                                    payload_raw = rpc_data.payload or "{}"
+                                    payload = json.loads(payload_raw)
+                                    product_id = payload.get("productId") or payload.get("product_id")
+                                    qty = int(payload.get("qty", 1))
+                                    if not product_id:
+                                        return "missing productId"
+                                    await tools.add_to_cart(str(product_id), qty, None)
+                                    return "ok"
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.exception("agent.addToCart RPC error: %s", exc)
+                                    return f"error: {exc}"
+                        
+                            ctx.room.local_participant.register_rpc_method("agent.addToCart", handle_add_to_cart_rpc)
+                        
+                            async def handle_overlay_ack_rpc(rpc_data) -> str:
+                                try:
+                                    payload_raw = rpc_data.payload or "{}"
+                                    payload = json.loads(payload_raw)
+                                    return await tools.handle_overlay_ack(payload)
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.exception("agent.overlayAck RPC error: %s", exc)
+                                    return f"error: {exc}"
+                        
+                            ctx.room.local_participant.register_rpc_method("agent.overlayAck", handle_overlay_ack_rpc)
+                        
+                            agent = ScoopAgent(session_state, tools)
+                        
+                            await session.start(
+                                agent=agent,
+                                room=ctx.room,
+                                room_input_options=RoomInputOptions(video_enabled=False, audio_enabled=True),
+                                room_output_options=RoomOutputOptions(audio_enabled=True),
+                            )
+                            # Ensure Sarah greets immediately on room join.
+                            await session.generate_reply()
+                        
+                        # ===============
+                        # Request Handler
+                        # ===============
+                        async def request_fnc(req: JobRequest) -> None:
+                            config = CONFIG
+                            agent_identity = config.agent_identity(req.id)
+                            controller_identity = config.controller_identity(req.id)
+                            metadata = config.agent_metadata(agent_identity)
+                            attributes = {**metadata, "agentControllerIdentity": controller_identity}
+                            await req.accept(
+                                name=config.agent_name,
+                                identity=controller_identity,
+                                metadata=json.dumps(metadata),
+                                attributes=attributes,
+                            )
+                        
+                        # =========
+                        # __main__
+                        # =========
+                        if __name__ == "__main__":
+                            config = CONFIG
+                            cli.run_app(
+                                WorkerOptions(
+                                    entrypoint_fnc=entrypoint,
+                                    worker_type=WorkerType.ROOM,
+                                    request_fnc=request_fnc,
+                                    agent_name=config.agent_name,
+                                )
+                            )
