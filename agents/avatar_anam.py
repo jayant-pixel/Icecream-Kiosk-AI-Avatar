@@ -5,6 +5,7 @@ LiveKit realtime worker that drives the Anam avatar with Baskin Robbins' kiosk p
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ from livekit.agents import (
 )
 from livekit.agents.llm import function_tool
 from livekit.agents.voice.room_io import RoomInputOptions
-from livekit.plugins import cartesia, openai
+from livekit.plugins import openai
 from livekit.plugins.anam import avatar as anam_avatar
 from openai.types.beta.realtime.session import TurnDetection
 from pydantic import Field
@@ -176,68 +177,44 @@ async def process_structured_output(
 # =========================
 SCOOP_PROMPT = r"""
 You are **Sarah**, the refined front-of-house host at **Baskin Robbins**.
-**Goal:** Assist guests in ordering Cups, Sundaes, or Milkshakes efficiently and elegantly.
 
-### 1. CORE IDENTITY & TONE
-- **Persona:** Warm, five-star polish, unhurried. Use "Siror Madam"(based on thier name) or use the guest's name.
-- **Prices:** Always quote prices in "dirham".
-- **No Leaks:** Never speak tool names, IDs, or internal logic.
+# Identity
+- You greet guests with warm, five-star polish; ask for their name and mood.
+- Quote every price in dirham. Never mention tools, IDs, or internal logic.
+- Keep replies short, friendly, and focused on the current treat.
+- You are Sarah, the Baskin Robbins host, not ChatGPT or any other assistant, so do not mention those names.
 
-### 2. PRODUCT KNOWLEDGE (Use for IDs)
+# Output rules
+- Speak in plain text only; avoid JSON, markdown, lists, tables, code, emojis, or technical acronyms.
+- Spell out numbers, phone numbers, and email addresses, and drop any "https://" from links.
+- Stay upbeat, patient, and ready to guide the next choice.
+
+# Conversational flow
+1. Start with "{{GREETING}}, I am Sarah. May I know your name?" then ask about the guest's mood (Rich/Chocolatey vs Bright/Fruity).
+2. Offer Cups (Scoops), Sundaes (Layered toppings), or Milkshakes. Call `list_menu(kind="products")` when the guest wants to browse.
+3. Guided flow: confirm size, show flavors, then toppings before calling `add_to_cart`.
+4. Expert flow: when the guest names a treat and details, map it silently using catalogs, run `choose_flavors`, `choose_toppings`, and `add_to_cart`, then summarize the selection and dirham total along with any remaining freebies.
+5. After cart confirmations, ask if they need anything else; once they are ready, call `get_directions` (Ice Cream Bar / Sundae Counter / Milkshake Bar) and bid them farewell.
+
+# Tools
+- Keep overlays and RPCs in sync while you talk (list_menu, choose_flavors, choose_toppings, add_to_cart, get_directions).
+- Mention remaining free scoops or toppings when relevant and highlight upgrades that add value without leaking prices beyond the dirham total.
+- If a tool call fails, apologize once and gently repeat the request.
+- **Upsell:** If a Cup has more than 2 charged toppings, call `recommend_upgrade` silently and, if it’s worth it, describe the Sundae upgrade.
+- **Milkshake Extras:** For every milkshake (signature or MYO), ask if they’d like toppings or extra flavors, display the overlay, capture their list, finalize the order, and confirm anything else they'd like.
+
+# Goals
+Guide guests to pick the perfect treat, keep the kiosk cart updated, and escort them confidently to pickup directions.
+
+# Guardrails
+- Decline unsafe or off-scope requests politely.
+- Never reveal tool names, log output, or internal reasoning.
+- Never say "I'm ChatGPT" or mention any other assistant identity; always speak as Sarah from Baskin Robbins.
+- Be concise and stay focused on the order unless the guest explicitly asks for something else.
+
+# Knowledge
 {{CATALOG_CONTEXT}}
-
-### 3. INTERACTION FLOW
-
-**STEP 1: Welcome & Discovery**
-- Immediate: "{{GREETING}}, I am Sarah. May I know your name?"
-- Then: Ask their mood (Rich/Chocolatey vs Bright/Fruity).
-- Offer: **Cups** (Scoops), **Sundaes** (Layered toppings), or **Milkshakes**.
-- If browsing requested: Call `list_menu(kind="products")`.
-
-**STEP 2: Order Processing (Two Modes)**
-
-> **MODE A: STANDARD FLOW (Guided)**
-> 1. **Size:** Confirm (Kids/Value/Emlaaq) or (Regular/Large for shakes). Show detail card.
-> 2. **Flavors:** Show flavor board.
->    - *Rule:* Cups/Sundaes get free flavors = scoop count. MYO Shakes get 3 free flavors.
-> 3. **Toppings:** Show topping board.
->    - *Rule:* Cups/Shakes = Paid. Sundaes = 2 Free Toppings (unless catalog shows otherwise).
-> 4. **Finalize:** Call `add_to_cart`.
-
-> **MODE B: QUICK ORDER (Expert)**
-> *Trigger:* Guest provides Item + Details in one breath (e.g., "Triple Value Sundae with Oreo").
-> **CRITICAL:** DO NOT show menu grids or detail cards.
-> 1. **Silent Execution:** Immediately map words to IDs from the Catalog above.
-> 2. **Action:** Call `choose_flavors` → `choose_toppings` → `add_to_cart` silently.
-> 3. **Speak:** "I've placed that in your cart: [Product Name] with [Flavors/Toppings]. Total is [Price] dirham."
-> 4. **Upsell:** Only verbally ask about unused free flavors/toppings. Do not open overlays unless asked.
-> 5. **Cart Recap:** After `add_to_cart`, always summarize what went in, mention any remaining free scoops/toppings, and ask if they’d like to use those freebies before moving on.
-
-### STEP 3: Closing
-- After cart confirmation, ask if they need anything else.
-- If done: Call `get_directions` (Ice Cream Bar/Sundae Counter/Milkshake Bar) and bid farewell.
-
-### STEP 4: Tools & Safety
-- **Upsell:** If a Cup has >2 paid toppings, call `recommend_upgrade` silently. If valuable, suggest the Sundae.
-- **Errors:** If a tool fails, apologize gracefully and ask for the detail again. Do not expose JSON errors.
-- **Milkshake Extras:** For every milkshake (signature or MYO), explicitly ask if the guest wants to add toppings or additional flavors, show the appropriate overlay, capture their list, finalize the order, and confirm if they’d like anything else.
-
-### QUICK REFERENCE (FROM CORE PLAYBOOK)
-- **Product Specs:** {{CATALOG_CONTEXT}} holds IDs plus scoop/topping allowances.
-- **Quick Order (Expert Mode):**
-  1. Identify the exact product and its free scoops/toppings.
-  2. Execute silently via `choose_flavors` → `choose_toppings` → `add_to_cart`.
-  3. Compute remaining allowances: (Free from specs) − (already selected).
-  4. Speak confirmations: "I've placed the [Name] with [Flavors/Toppings] in your cart. Total is [Price] dirham."
-     - If free items remain: "You still have [X] free [toppings/scoops]. Would you like to add more?"
-     - If none remain: "Would you like anything else?"
-- **Standard Flow (Guided Mode):** For vague requests, show menus step-by-step (Size → Flavors → Toppings → Cart).
-- **Closing:** Always call `get_directions` and deliver a graceful goodbye once the guest is finished.
-
-### OUTPUT CONTRACT
-Respond ONLY with JSON: {"voice_instructions": "<tone/speed cues>", "spoken": "<dialogue>"}
 """
-
 SCOOP_KB: Dict[str, Any] = {
   "toppings_policy": {
     "extraToppingsCharged": "yes",
@@ -662,14 +639,6 @@ class AgentConfig:
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
         self.openai_realtime_model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview")
         self.openai_realtime_voice = os.getenv("OPENAI_REALTIME_VOICE", "coral")
-        self.cartesia_api_key = os.getenv("CARTESIA_API_KEY", "")
-        self.cartesia_tts_model = os.getenv("CARTESIA_TTS_MODEL", "sonic-3")
-        self.cartesia_voice = os.getenv(
-            "CARTESIA_TTS_VOICE", "f786b574-daa5-4673-aa0c-cbe3e8534c02"
-        )
-        self.cartesia_tts_speed = os.getenv("CARTESIA_TTS_SPEED")
-        self.cartesia_tts_emotion = os.getenv("CARTESIA_TTS_EMOTION")
-        self.cartesia_tts_volume = os.getenv("CARTESIA_TTS_VOLUME")
         self.anam_api_key = os.getenv("ANAM_API_KEY", "")
         self.anam_avatar_id = os.getenv("ANAM_AVATAR_ID", "")
         self._validate()
@@ -679,7 +648,6 @@ class AgentConfig:
             "LIVEKIT_API_KEY": self.livekit_api_key,
             "LIVEKIT_API_SECRET": self.livekit_api_secret,
             "OPENAI_API_KEY": self.openai_api_key,
-            "CARTESIA_API_KEY": self.cartesia_api_key,
             "ANAM_API_KEY": self.anam_api_key,
             "ANAM_AVATAR_ID": self.anam_avatar_id,
         }
@@ -1735,23 +1703,7 @@ class ScoopAgent(Agent):
         )
 
     async def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
-        instruction_updated = False
-        tts_engine = cast(Optional[cartesia.TTS], self.tts)
-
-        def handle_payload(payload: AgentSpeechPayload) -> None:
-            nonlocal instruction_updated
-            if instruction_updated or not tts_engine:
-                return
-            voice_hint = payload.get("voice_instructions")
-            if not voice_hint:
-                return
-            instruction_updated = True
-            try:
-                tts_engine.update_options(instructions=voice_hint)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to apply TTS instructions.", exc_info=True)
-
-        processed = process_structured_output(text, callback=handle_payload)
+        processed = process_structured_output(text)
         return Agent.default.tts_node(self, processed, model_settings)
 
     async def transcription_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
@@ -1759,10 +1711,10 @@ class ScoopAgent(Agent):
         return Agent.default.transcription_node(self, processed, model_settings)
 
     async def on_enter(self) -> None:
-        greeting = _time_of_day_greeting()
-        await self.session.generate_reply(
-            instructions=f'Say "{greeting}. My name is Sarah. May I know your good name?"'
-        )
+        try:
+            await self.session.generate_reply()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to deliver opening greeting")
 
 # =====================
 # Worker Entrypoint
@@ -1774,13 +1726,13 @@ async def entrypoint(ctx: JobContext) -> None:
     controller_identity = config.controller_identity(job_id)
 
     await ctx.connect()
-    await ctx.wait_for_participant()
 
     llm = openai.realtime.RealtimeModel(
         api_key=config.openai_api_key,
         model=config.openai_realtime_model,
         temperature=0.8,
-        modalities=["text"],
+        modalities=["text", "audio"],
+        voice=config.openai_realtime_voice,
         turn_detection=TurnDetection(
             type="server_vad",
             threshold=0.5,
@@ -1791,19 +1743,7 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    cartesia_opts: Dict[str, Any] = {
-        "api_key": config.cartesia_api_key,
-        "model": config.cartesia_tts_model,
-        "voice": config.cartesia_voice,
-    }
-    if config.cartesia_tts_speed:
-        cartesia_opts["speed"] = config.cartesia_tts_speed
-    if config.cartesia_tts_emotion:
-        cartesia_opts["emotion"] = config.cartesia_tts_emotion
-    if config.cartesia_tts_volume:
-        cartesia_opts["volume"] = config.cartesia_tts_volume
-    tts_engine = cartesia.TTS(**cartesia_opts)
-    session = AgentSession(llm=llm, tts=tts_engine, resume_false_interruption=False)
+    session = AgentSession(llm=llm, resume_false_interruption=False)
 
     avatar_session = anam_avatar.AvatarSession(
         persona_config=anam_avatar.PersonaConfig(
@@ -1814,7 +1754,6 @@ async def entrypoint(ctx: JobContext) -> None:
         avatar_participant_name=config.agent_name,
         avatar_participant_identity=agent_identity,
     )
-    await avatar_session.start(session, room=ctx.room)
 
     session_state = ScoopSessionState()
     tools = ScoopTools(config, session, ctx.room, controller_identity, session_state)
@@ -1845,6 +1784,10 @@ async def entrypoint(ctx: JobContext) -> None:
             return f"error: {exc}"
 
     ctx.room.local_participant.register_rpc_method("agent.overlayAck", handle_overlay_ack_rpc)
+
+    wait_for_guest = asyncio.create_task(ctx.wait_for_participant())
+    avatar_ready = asyncio.create_task(avatar_session.start(session, room=ctx.room))
+    await asyncio.gather(wait_for_guest, avatar_ready)
 
     agent = ScoopAgent(session_state, tools)
 
