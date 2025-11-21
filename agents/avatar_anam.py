@@ -2173,8 +2173,7 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.start(
         agent=agent,
         room=ctx.room,
-        # CHANGED: use room_options instead of room_input_options
-        room_options=RoomInputOptions(
+        room_input_options=RoomInputOptions(
             video_enabled=False,
             audio_enabled=True,
         ),
