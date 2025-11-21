@@ -3,6 +3,7 @@ import {
   ConnectionStateToast,
   RoomAudioRenderer,
   useDataChannel,
+  useRoomContext,
   useTracks,
   VideoTrack,
 } from "@livekit/components-react";
@@ -11,6 +12,8 @@ import * as React from "react";
 import { ControlBar } from "./ControlBar";
 import { OverlayLayer } from "./OverlayLayer";
 import { ProductShowcase } from "./ProductShowcase";
+import type { RpcInvocationData } from "livekit-client";
+import type { DirectionsPayload } from "./ProductShowcase";
 
 export function VideoConference({
   ...props
@@ -29,6 +32,31 @@ export function VideoConference({
           track.participant?.identity?.includes("avatar")
       );
   }, [tracks]);
+
+  const room = useRoomContext();
+  const [rpcDirections, setRpcDirections] = React.useState<DirectionsPayload | null>(null);
+
+  React.useEffect(() => {
+    if (!room) return;
+
+    const handleDirectionsRpc = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payloadRaw =
+          typeof data?.payload === "string" ? data.payload : JSON.stringify(data?.payload ?? {});
+        const payload = JSON.parse(payloadRaw) as DirectionsPayload;
+        setRpcDirections(payload);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling directions RPC", error);
+        return "error";
+      }
+    };
+
+    room.registerRpcMethod("client.directions", handleDirectionsRpc);
+    return () => {
+      room.unregisterRpcMethod("client.directions");
+    };
+  }, [room]);
 
   useDataChannel(
     "lk.transcription",
@@ -60,10 +88,10 @@ export function VideoConference({
             </div>
           </div>
         )}
-        <OverlayLayer />
+        <OverlayLayer rpcDirections={rpcDirections} />
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-end px-3 pb-6 sm:px-4 lg:px-10">
           <div className="pointer-events-auto flex w-full max-w-6xl flex-col items-center gap-4">
-            <ProductShowcase className="w-full" />
+            <ProductShowcase className="w-full" directions={rpcDirections} />
           </div>
         </div>
       </div>

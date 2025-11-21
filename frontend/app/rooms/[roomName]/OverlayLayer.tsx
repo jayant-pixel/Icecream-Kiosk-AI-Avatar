@@ -1,10 +1,11 @@
-﻿
-"use client";
+﻿"use client";
 
 import type { ReactNode } from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReceivedDataMessage } from "@livekit/components-core";
 import { useDataChannel, useRoomContext, useVoiceAssistant } from "@livekit/components-react";
+import type { RpcInvocationData } from "livekit-client";
+import type { DirectionsPayload } from "./ProductShowcase";
 import clsx from "clsx";
 
 type ProductCard = {
@@ -172,6 +173,10 @@ type CartOverlayPayload = {
   overlayId?: string;
 };
 
+type CartRpcPayload = {
+  cart?: CartOverlayPayload["cart"];
+};
+
 type DirectionLocation = {
   displayName?: string;
   hint?: string;
@@ -216,13 +221,55 @@ type OverlayPayload =
 
 type OverlayLayerKind = "products" | "flavors" | "toppings" | "cart" | "directions";
 
+type OverlayLayerProps = {
+  rpcDirections?: DirectionsPayload | null;
+};
+
 type CartIndicator = { count: number; total: number };
 
 const decoder = new TextDecoder();
 const OVERLAY_TOPIC = "ui.overlay";
 const CATEGORY_OPTIONS = ["All", "Cups", "Sundae Cups", "Milk Shakes"];
 const FLAVOR_TABS = ["All", "Choco", "Berry", "Classics", "SugarLess"];
-export function OverlayLayer() {
+
+function parseRpcPayload<T>(data?: RpcInvocationData): T | null {
+  if (!data?.payload) {
+    return null;
+  }
+  try {
+    return JSON.parse(data.payload) as T;
+  } catch (error) {
+    console.error("Failed to parse RPC payload", error);
+    return null;
+  }
+}
+
+/**
+ * UPDATED: use `payload.locations` (not `payload.directions`)
+ * and type each entry as DirectionLocation to avoid implicit any.
+ */
+const rpcDirectionsToLocations = (payload: DirectionsPayload): DirectionLocation[] => {
+  const entries: DirectionLocation[] =
+    "locations" in payload && Array.isArray(payload.locations)
+      ? (payload.locations as DirectionLocation[])
+      : [];
+
+  const displayFallback = payload.display ?? payload.displayName;
+  const normalized: DirectionLocation[] = entries.map((entry: DirectionLocation) => ({
+    displayName: entry.displayName ?? displayFallback,
+    hint: entry.hint ?? undefined,
+    mapImage: entry.mapImage ?? null,
+    products: entry.products,
+  }));
+
+  if (!normalized.length && displayFallback) {
+    normalized.push({ displayName: displayFallback });
+  }
+
+  return normalized;
+};
+
+export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
   const room = useRoomContext();
   const { agent } = useVoiceAssistant();
   const [productPayload, setProductPayload] = useState<ProductsOverlayPayload | null>(null);
@@ -400,6 +447,65 @@ export function OverlayLayer() {
       [handleOverlayPacket]
     )
   );
+
+  useEffect(() => {
+    if (!room) return;
+
+    const handleMenuLoaded = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payload = parseRpcPayload<Record<string, unknown>>(data);
+        console.log("menuLoaded", payload);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling menuLoaded RPC", error);
+        return "error";
+      }
+    };
+
+    const handleCartUpdated = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payload = parseRpcPayload<CartRpcPayload>(data);
+        console.log("cartUpdated", payload);
+        if (payload?.cart) {
+          setCartPayload({ kind: "cart", cart: payload.cart });
+          setActiveLayer("cart");
+          setPanelLayer(null);
+          const count = payload.cart.items?.length ?? 0;
+          const total = payload.cart.totalAED ?? 0;
+          setCartIndicator({ count, total });
+        }
+        return "ok";
+      } catch (error) {
+        console.error("Error handling cartUpdated RPC", error);
+        return "error";
+      }
+    };
+
+    room.registerRpcMethod("client.menuLoaded", handleMenuLoaded);
+    room.registerRpcMethod("client.cartUpdated", handleCartUpdated);
+    return () => {
+      room.unregisterRpcMethod("client.menuLoaded");
+      room.unregisterRpcMethod("client.cartUpdated");
+    };
+  }, [room]);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!rpcDirections) {
+      return;
+    }
+    if (rpcDirections.action === "clear") {
+      setDirectionsPayload(null);
+      setActiveLayer("products");
+      setPanelLayer(null);
+      return;
+    }
+    const locations = rpcDirectionsToLocations(rpcDirections);
+    setDirectionsPayload({ kind: "directions", locations });
+    setActiveLayer("directions");
+    setPanelLayer(null);
+  }, [rpcDirections]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const panelContent = useMemo(() => {
     if (panelLayer === "flavors" && flavorPayload) {
@@ -786,43 +892,43 @@ function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["car
               sizeLabel && !productName.toLowerCase().includes(sizeLabel.toLowerCase());
             return (
               <article key={item.lineId ?? item.product_id ?? item.name} className="space-y-3 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm">
-              <div className="flex gap-3">
-                <div className="h-20 w-20 shrink-0">
-                  <CardImage src={item.imageUrl} alt={item.name} className="h-20 w-20" contain />
-                </div>
-                <div className="flex-1 space-y-1">
-                  <p className="text-base font-semibold">
-                    {productName}
-                    {showSize ? ` - ${sizeLabel}` : ""}
-                    {item.category ? ` (${item.category})` : ""}
-                  </p>
-                  {item.display ? <p className="text-xs text-black/50">Pickup: {item.display}</p> : null}
-                  <div className="flex flex-wrap gap-3 text-[11px] text-black/70">
-                    <span>Base {formatDirham(item.basePriceAED)}</span>
-                    {item.flavorExtrasAED ? <span>Flavor add-ons +{formatDirham(item.flavorExtrasAED)}</span> : null}
-                    {item.toppingExtrasAED ? <span>Topping add-ons +{formatDirham(item.toppingExtrasAED)}</span> : null}
+                <div className="flex gap-3">
+                  <div className="h-20 w-20 shrink-0">
+                    <CardImage src={item.imageUrl} alt={item.name} className="h-20 w-20" contain />
+                  </div>
+                  <div className="flex-1 space-y-1">
+                    <p className="text-base font-semibold">
+                      {productName}
+                      {showSize ? ` - ${sizeLabel}` : ""}
+                      {item.category ? ` (${item.category})` : ""}
+                    </p>
+                    {item.display ? <p className="text-xs text-black/50">Pickup: {item.display}</p> : null}
+                    <div className="flex flex-wrap gap-3 text-[11px] text-black/70">
+                      <span>Base {formatDirham(item.basePriceAED)}</span>
+                      {item.flavorExtrasAED ? <span>Flavor add-ons +{formatDirham(item.flavorExtrasAED)}</span> : null}
+                      {item.toppingExtrasAED ? <span>Topping add-ons +{formatDirham(item.toppingExtrasAED)}</span> : null}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <CartFlavorList flavors={item.flavors} />
-              <CartToppingList toppings={item.toppings} />
-              <div className="flex items-center justify-between">
-                <div className="space-y-1 text-xs text-black/60">
-                  <div className="flex items-center gap-2">
-                    Qty:
-                    <QuantityBadge value={qty} />
+                <CartFlavorList flavors={item.flavors} />
+                <CartToppingList toppings={item.toppings} />
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1 text-xs text-black/60">
+                    <div className="flex items-center gap-2">
+                      Qty:
+                      <QuantityBadge value={qty} />
+                    </div>
+                    <p>
+                      Per treat: <span className="font-semibold text-black/80">{formatDirham(unitTotal)}</span>
+                    </p>
                   </div>
-                  <p>
-                    Per treat: <span className="font-semibold text-black/80">{formatDirham(unitTotal)}</span>
-                  </p>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(item.lineTotalAED)}</p>
+                    <p className="text-[11px] text-black/50">Line total</p>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(item.lineTotalAED)}</p>
-                  <p className="text-[11px] text-black/50">Line total</p>
-                </div>
-              </div>
-            </article>
-          );
+              </article>
+            );
           })}
         </div>
       )}

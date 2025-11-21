@@ -33,15 +33,16 @@ type ProductRpcPayload =
   | { action: "added"; product: ProductCard; qty?: number; summary?: Record<string, unknown> }
   | { action: "clear" };
 
-type DirectionEntry = {
+export type DirectionEntry = {
   displayName?: string;
   hint?: string | null;
   mapImage?: string | null;
+  products?: string[];
 };
 
-type DirectionsPayload =
-  | { action: "show"; display?: string; directions?: DirectionEntry[] }
-  | { action: "clear"; display?: string };
+export type DirectionsPayload =
+  | { action: "show"; display?: string; displayName?: string; directions?: DirectionEntry[] }
+  | { action: "clear"; display?: string; displayName?: string };
 
 type ToastState = {
   product: ProductCard;
@@ -95,11 +96,12 @@ const getCategoryLabel = (card?: ProductCard | null) => {
 
 const slugifyCategory = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
-type ProductShowcaseProps = {
+export type ProductShowcaseProps = {
   className?: string;
+  directions?: DirectionsPayload | null;
 };
 
-export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
+export function ProductShowcase({ className, directions }: ProductShowcaseProps = {}) {
   const room = useRoomContext();
   const { agent } = useVoiceAssistant();
 
@@ -110,7 +112,6 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
   const [cartItems, setCartItems] = useState<CartItemState[]>([]);
   const [toast, setToast] = useState<ToastState | null>(null);
-  const [directions, setDirections] = useState<DirectionsPayload | null>(null);
   const [pendingProductId, setPendingProductId] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>("all");
 
@@ -240,38 +241,6 @@ export function ProductShowcase({ className }: ProductShowcaseProps = {}) {
     room.registerRpcMethod("client.products", handleProductRpc);
     return () => {
       room.unregisterRpcMethod("client.products");
-    };
-  }, [room]);
-
-  useEffect(() => {
-    if (!room) return;
-
-    const handleDirectionsRpc = async (data: RpcInvocationData): Promise<string> => {
-      try {
-        const payloadRaw =
-          typeof data?.payload === "string" ? data.payload : JSON.stringify(data?.payload ?? {});
-        const payload = JSON.parse(payloadRaw) as DirectionsPayload;
-
-        switch (payload.action) {
-          case "show":
-            setDirections(payload);
-            break;
-          case "clear":
-            setDirections(null);
-            break;
-          default:
-            break;
-        }
-        return "ok";
-      } catch (error) {
-        console.error("Error handling directions RPC", error);
-        return "error";
-      }
-    };
-
-    room.registerRpcMethod("client.directions", handleDirectionsRpc);
-    return () => {
-      room.unregisterRpcMethod("client.directions");
     };
   }, [room]);
 

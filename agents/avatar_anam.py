@@ -1,7 +1,8 @@
-"""
-Baskin Robbins Avatar Agent — Galadari POC
-------------------------------------------
-LiveKit realtime worker that drives the Anam avatar with Baskin Robbins' kiosk persona.
+﻿"""
+Baskin Robbins Avatar Agent — Hybrid
+------------------------------------
+Structure/Tools from Code 1 (Single Agent).
+Pipeline/RPCs from Code 2 (Deepgram/Google/Cartesia).
 """
 from __future__ import annotations
 
@@ -12,11 +13,19 @@ import os
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterable, Callable, Dict, List, Optional, TYPE_CHECKING, Literal, cast
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    List,
+    Optional,
+    TYPE_CHECKING,
+    Literal,
+    cast,
+)
 import re
-import time
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -24,7 +33,6 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobRequest,
-    ModelSettings,
     RunContext,
     WorkerOptions,
     WorkerType,
@@ -32,12 +40,11 @@ from livekit.agents import (
 )
 from livekit.agents.llm import function_tool
 from livekit.agents.voice.room_io import RoomInputOptions
-from livekit.plugins import openai
+
+# --- CHANGED: New Plugin Imports ---
+from livekit.plugins import google, deepgram, cartesia, silero
 from livekit.plugins.anam import avatar as anam_avatar
-from openai.types.beta.realtime.session import TurnDetection
 from pydantic import Field
-from pydantic_core import from_json
-from typing_extensions import TypedDict
 
 logger = logging.getLogger("baskin-avatar-agent")
 logger.setLevel(logging.INFO)
@@ -51,9 +58,13 @@ else:
 OVERLAY_TOPIC = "ui.overlay"
 CATEGORY_FALLBACK = "Highlights"
 
+# Simple UAE VAT (5%) – applied on top of item + extras
+VAT_RATE = Decimal("0.05")
+
 # =========================
-# Global Helper Functions
+# Global Helper Functions (From Code 1)
 # =========================
+
 
 def _normalize_label(value: Optional[str]) -> str:
     if not value:
@@ -98,7 +109,6 @@ def build_name_index(entries: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]
 
 
 def _sanitize_output(data: Any) -> Any:
-    """Recursively convert Decimal values so JSON serialization never fails."""
     if isinstance(data, Decimal):
         return float(data)
     if isinstance(data, dict):
@@ -109,7 +119,6 @@ def _sanitize_output(data: Any) -> Any:
 
 
 def _time_of_day_greeting() -> str:
-    """Return a polite greeting based on the current local time."""
     hour = datetime.now().hour
     if 5 <= hour < 12:
         return "Good morning"
@@ -117,9 +126,11 @@ def _time_of_day_greeting() -> str:
         return "Good afternoon"
     return "Good evening"
 
+
 @dataclass
 class ScoopSessionState:
-    """Tracks contextual signals that help steer the LLM away from hallucinations."""
+    """Tracks contextual signals (From Code 1)."""
+
     guest_name: Optional[str] = None
     last_overlay_kind: Optional[str] = None
     last_overlay_payload: Optional[Dict[str, Any]] = None
@@ -128,502 +139,850 @@ class ScoopSessionState:
     current_product_id: Optional[str] = None
     current_product_summary: Optional[str] = None
 
+    # NEW: last RPC context
+    last_rpc_method: Optional[str] = None
+    last_rpc_request: Optional[Dict[str, Any]] = None
+    last_rpc_response: Optional[Dict[str, Any]] = None
+
     def describe(self) -> str:
         overlay_info = self.last_overlay_kind or "none"
         history = ", ".join(self.overlay_history[-4:]) if self.overlay_history else "none"
         guest = self.guest_name or "unknown"
         active_product = self.current_product_id or "none"
         product_summary = self.current_product_summary or "No active build in progress."
+
+        rpc_part = f"Last UI RPC: {self.last_rpc_method or 'none'}."
+
         return (
-            f"Guest name (if shared): {guest}. "
-            f"Last overlay rendered: {overlay_info}. "
-            f"Recent overlays: {history}. "
+            f"Guest name: {guest}. "
+            f"Last UI overlay shown: {overlay_info}. "
             f"Active product focus: {active_product}. "
-            f"{product_summary}"
+            f"{product_summary} "
+            f"{rpc_part}"
         )
 
 
-class AgentSpeechPayload(TypedDict, total=False):
-    voice_instructions: str
-    spoken: str
-
-
-async def process_structured_output(
-    text: AsyncIterable[str],
-    callback: Optional[Callable[[AgentSpeechPayload], None]] = None,
-) -> AsyncIterable[str]:
-    acc_text = ""
-    last_response = ""
-    async for chunk in text:
-        acc_text += chunk
-        try:
-            payload: AgentSpeechPayload = from_json(acc_text, allow_partial="trailing-strings")
-        except ValueError:
-            continue
-
-        if callback:
-            callback(payload)
-
-        spoken = payload.get("spoken") or ""
-        if not spoken:
-            continue
-        new_delta = spoken[len(last_response) :]
-        if new_delta:
-            yield new_delta
-        last_response = spoken
-
 # =========================
-# Conversation Instructions
+# Conversation Instructions (Modified & Strengthened)
 # =========================
 SCOOP_PROMPT = r"""
-You are **Sarah**, the refined front-of-house host at **Baskin Robbins**.
+You are **Sarah**, the refined, polished, and friendly front-of-house host at **Baskin Robbins**.
 
 # Identity
-- You greet guests with warm, five-star polish; ask for their name and mood.
-- Quote every price in dirham. Never mention tools, IDs, or internal logic.
-- Keep replies short, friendly, and focused on the current treat.
-- You are Sarah, the Baskin Robbins host, not ChatGPT or any other assistant, so do not mention those names.
+- You are Sarah, a Baskin Robbins host (NOT an AI system).
+- Your tone is warm, elegant, and confidently in control of the ordering flow.
+- You always keep the **visual kiosk overlays perfectly synced** with the conversation.
+- You understand the current UI state using **{{SESSION_CONTEXT}}**.
 
-# Output rules
-- Speak in plain text only; avoid JSON, markdown, lists, tables, code, emojis, or technical acronyms.
-- Spell out numbers, phone numbers, and email addresses, and drop any "https://" from links.
-- Stay upbeat, patient, and ready to guide the next choice.
+# Output Rules
+- **Plain Text Only.** Never output JSON, IDs, tool names, variables, code, or Markdown.
+- **Short responses (1–3 sentences).** One question at a time.
+- **Currency:** Always say “dirham”.
+- **Speak numbers fully spelled out.**
+- **Do NOT assume anything** (flavors, toppings, size, quantity). Ask and confirm only after showing the correct UI overlay.
 
-# Conversational flow
-1. Start with "{{GREETING}}, I am Sarah. May I know your name?" then ask about the guest's mood (Rich/Chocolatey vs Bright/Fruity).
-2. Offer Cups (Scoops), Sundaes (Layered toppings), or Milkshakes. Call `list_menu(kind="products")` when the guest wants to browse.
-3. Guided flow: confirm size, show flavors, then toppings before calling `add_to_cart`.
-4. Expert flow: when the guest names a treat and details, map it silently using catalogs, run `choose_flavors`, `choose_toppings`, and `add_to_cart`, then summarize the selection and dirham total along with any remaining freebies.
-5. After cart confirmations, ask if they need anything else; once they are ready, call `get_directions` (Ice Cream Bar / Sundae Counter / Milkshake Bar) and bid them farewell.
+# Greeting
+Start with:
+**"{{GREETING}}, welcome to Baskin Robbins. My name is Sarah. May I know your name?"**
 
-# Tools
-- Keep overlays and RPCs in sync while you talk (list_menu, choose_flavors, choose_toppings, add_to_cart, get_directions).
-- Mention remaining free scoops or toppings when relevant and highlight upgrades that add value without leaking prices beyond the dirham total.
-- If a tool call fails, apologize once and gently repeat the request.
-- **Upsell:** If a Cup has more than 2 charged toppings, call `recommend_upgrade` silently and, if it’s worth it, describe the Sundae upgrade.
-- **Milkshake Extras:** For every milkshake (signature or MYO), ask if they’d like toppings or extra flavors, display the overlay, capture their list, finalize the order, and confirm anything else they'd like.
+Then continue only after the guest replies.
 
-# Goals
-Guide guests to pick the perfect treat, keep the kiosk cart updated, and escort them confidently to pickup directions.
+---
 
-# Guardrails
-- Decline unsafe or off-scope requests politely.
-- Never reveal tool names, log output, or internal reasoning.
-- Never say "I'm ChatGPT" or mention any other assistant identity; always speak as Sarah from Baskin Robbins.
-- Be concise and stay focused on the order unless the guest explicitly asks for something else.
+# Phase 1 — Select Category  
+After you get their name:
+“Wonderful, {{name}}. What would you like to order today? We have **Ice Cream Cups**, **Sundae Cups**, and **Milkshakes**.”
+
+### If guest chooses a category:
+- Cups → `list_menu(kind="products", category="Cups", view="grid")`
+- Sundaes → `list_menu(kind="products", category="Sundae Cups", view="grid")`
+- Shakes → `list_menu(kind="products", category="Milk Shakes", view="grid")`
+
+Do **not** wait for “show me options.”  
+If they said the category, you MUST show the grid immediately.  
+Then ask:  
+“Please pick an item you like.”
+
+---
+
+# Phase 2 — Guided Order (Standard Flow)
+This is the **default** flow when the guest has NOT given flavors or toppings yet.
+
+## STEP A — Product Selected → Show Detail Card
+When a guest chooses an item (by touch or by name):
+1. Show detail card:  
+   `list_menu(kind="products", product_id=..., view="detail")`
+2. **Do NOT pick Flavors or Toppings automatically.**
+3. Immediately open the flavor board:  
+   `list_menu(kind="flavors", product_id=...)`
+4. Say:  
+   “Great choice. I’ve opened the flavor menu for you. Which flavors would you like?”
+
+## STEP B — Flavor Selection  
+- When the guest names flavors, call:  
+  `choose_flavors(product_id=..., flavor_ids=[...])`
+- Then refresh the product card:  
+  `list_menu(kind="products", product_id=..., view="detail")`
+
+If all free scoops are used:
+- Immediately switch to toppings:  
+  `list_menu(kind="toppings", product_id=...)`
+- Ask:  
+  “Would you like to add toppings?”
+
+If more scoops remain:
+- Ask: “And your next flavor?”
+
+## STEP C — Topping Selection  
+When the guest names toppings:
+- Call `choose_toppings(product_id=..., topping_ids=[...])`
+- Refresh detail card again:  
+  `list_menu(kind="products", product_id=..., view="detail")`
+- Confirm the choices politely.
+
+If they say “no toppings”:
+- Skip toppings entirely.
+
+## STEP D — Add to Cart (Only AFTER flav + top)
+When flavors (and toppings if applicable) are finished:
+- Confirm verbally:  
+  “Shall I add this to your cart?”
+- After approval, call:  
+  `add_to_cart(product_id=..., qty=1)`
+
+Then summarize the item:
+- Base price
+- Extra flavor cost
+- Extra topping cost
+- Final total (dirham)
+
+Ask next:
+“Would you like anything else?”
+
+---
+
+# Phase 3 — Quick Order (Expert Flow)
+Trigger this ONLY when the guest gives **complete details in one sentence**, including:
+- product  
+- size  
+- all flavors  
+- all toppings
+
+### Quick Order Steps
+1. Confirm verbally (repeat their full order).
+2. **DO NOT open any menus in quick mode.**
+3. Silently call:
+   - `choose_flavors(...)`
+   - `choose_toppings(...)`  
+     (skip if they didn’t mention toppings)
+4. Then:  
+   `add_to_cart(...)`
+5. Summarize price and ask “Would you like anything else?”
+
+### Exception:
+If they request a double/triple scoop but mention fewer flavors than the number of scoops:
+You MUST ask:  
+“You still have one free scoop. Would you like to choose another flavor or repeat one?”
+
+---
+
+# Phase 4 — Loop or Checkout
+If user wants more items:
+- Return to **Phase 1 category selection**.
+
+If user says “that’s all”:
+- Use correct counter:
+  - Cups → `"Ice Cream Bar"`
+  - Sundaes → `"Sundae Counter"`
+  - Milkshakes → `"Milkshake Bar"`
+
+Call:
+`get_directions(display_name="...")`
+
+Then say:
+“Perfect. Please proceed to the counter to collect your order. Enjoy your treat!”
+
+---
+
+# Guardrails (VERY IMPORTANT)
+- **NEVER invent or assume flavors, toppings, or sizes.**
+- **NEVER call `add_to_cart` without flavors selected.**
+- **NEVER open toppings before flavors.**
+- **NEVER skip the detail card.**
+- **NEVER assume default items like ‘vanilla’ or ‘chocolate’.**
+- **NEVER select anything unless the guest says it.**
+- **Menu first → THEN ask.**
+- **Every tool call must reflect the user’s exact intent.**
+
+---
 
 # Knowledge
 {{CATALOG_CONTEXT}}
+
+# UI State Awareness
+Use **{{SESSION_CONTEXT}}** to understand what the user is already seeing and what overlays or RPCs were sent before deciding the next action.
 """
+
+# [Keep SCOOP_KB exactly as in Code 1]
 SCOOP_KB: Dict[str, Any] = {
-  "toppings_policy": {
-    "extraToppingsCharged": "yes",
-    "extraToppingPriceAED": 5.0,
-    "note": "Extra toppings are charged per topping unless included by the item/size. Milkshakes can take unlimited toppings; each topping is charged according to its own priceAED."
-  },
-  "flavor_policy": {
-    "extraFlavorsCharged": "yes",
-    "defaultFlavorPriceAED": 1.0,
-    "note": "Items include free flavors equal to their scoop count. Additional flavors beyond that number are charged per flavor."
-  },
-  "image_defaults": {
-    "square": "https://dummyimage.com/200x200/efefef/222222&text=Image",
-    "rect": "https://dummyimage.com/600x400/efefef/222222&text=Image"
-  },
-  "displays": {
-    "Ice Cream Bar": {
-      "displayName": "Ice Cream Bar",
-      "hint": "You’ll find your cup ice creams being scooped here.",
-      "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg"
+    "toppings_policy": {
+        "extraToppingsCharged": "yes",
+        "extraToppingPriceAED": 5.0,
+        "note": "Extra toppings are charged per topping unless included by the item/size. Milkshakes can take unlimited toppings; each topping is charged according to its own priceAED.",
     },
-    "Sundae Counter": {
-      "displayName": "Sundae Counter",
-      "hint": "This is where all Sundae Cups are prepared and topped.",
-      "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg"
+    "flavor_policy": {
+        "extraFlavorsCharged": "yes",
+        "defaultFlavorPriceAED": 1.0,
+        "note": "Items include free flavors equal to their scoop count. Additional flavors beyond that number are charged per flavor.",
     },
-    "Milkshake Bar": {
-      "displayName": "Milkshake Bar",
-      "hint": "Shakes are blended fresh right here.",
-      "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg"
-    }
-  },
-  "product_order": [
-    "cup_single_kids", "cup_single_value", "cup_single_emlaaq",
-    "cup_double_kids", "cup_double_value", "cup_double_emlaaq",
-    "cup_triple_kids", "cup_triple_value", "cup_triple_emlaaq",
-    "sundae_single_kids", "sundae_single_value", "sundae_single_emlaaq",
-    "sundae_double_kids", "sundae_double_value", "sundae_double_emlaaq",
-    "sundae_triple_kids", "sundae_triple_value", "sundae_triple_emlaaq",
-    "shake_chocolate_chiller_regular", "shake_chocolate_chiller_large",
-    "shake_strawberry_mania_regular", "shake_strawberry_mania_large",
-    "shake_jamoca_fudge_regular", "shake_jamoca_fudge_large",
-    "shake_praline_pleasure_regular", "shake_praline_pleasure_large",
-    "shake_make_own_regular"
-  ],
-  "products": {
-    "cup_single_kids": {
-      "id": "cup_single_kids",
-      "name": "Single Scoop Cup — Kids",
-      "category": "Cups",
-      "size": "Kids",
-      "scoops": 1,
-      "priceAED": 12,
-      "description": "One scoop in a kid-sized cup.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/wwweif79_0.jpg",
-      "display": "Ice Cream Bar"
+    "image_defaults": {
+        "square": "https://dummyimage.com/200x200/efefef/222222&text=Image",
+        "rect": "https://dummyimage.com/600x400/efefef/222222&text=Image",
     },
-    "cup_single_value": {
-      "id": "cup_single_value",
-      "name": "Single Scoop Cup — Value",
-      "category": "Cups",
-      "size": "Value",
-      "scoops": 1,
-      "priceAED": 16,
-      "description": "One full scoop in a value-sized cup.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/7ysjfilv_0.jpg",
-      "display": "Ice Cream Bar"
+    "displays": {
+        "Ice Cream Bar": {
+            "displayName": "Ice Cream Bar",
+            "hint": "You’ll find your cup ice creams being scooped here.",
+            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg",
+        },
+        "Sundae Counter": {
+            "displayName": "Sundae Counter",
+            "hint": "This is where all Sundae Cups are prepared and topped.",
+            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg",
+        },
+        "Milkshake Bar": {
+            "displayName": "Milkshake Bar",
+            "hint": "Shakes are blended fresh right here.",
+            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg",
+        },
     },
-    "cup_single_emlaaq": {
-      "id": "cup_single_emlaaq",
-      "name": "Single Scoop Cup — Emlaaq",
-      "category": "Cups",
-      "size": "Emlaaq",
-      "scoops": 1,
-      "priceAED": 20,
-      "description": "One generous Emlaaq scoop.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/ceeoxr60_0.jpg",
-      "display": "Ice Cream Bar"
+    "product_order": [
+        "cup_single_kids",
+        "cup_single_value",
+        "cup_single_emlaaq",
+        "cup_double_kids",
+        "cup_double_value",
+        "cup_double_emlaaq",
+        "cup_triple_kids",
+        "cup_triple_value",
+        "cup_triple_emlaaq",
+        "sundae_single_kids",
+        "sundae_single_value",
+        "sundae_single_emlaaq",
+        "sundae_double_kids",
+        "sundae_double_value",
+        "sundae_double_emlaaq",
+        "sundae_triple_kids",
+        "sundae_triple_value",
+        "sundae_triple_emlaaq",
+        "shake_chocolate_chiller_regular",
+        "shake_chocolate_chiller_large",
+        "shake_strawberry_mania_regular",
+        "shake_strawberry_mania_large",
+        "shake_jamoca_fudge_regular",
+        "shake_jamoca_fudge_large",
+        "shake_praline_pleasure_regular",
+        "shake_praline_pleasure_large",
+        "shake_make_own_regular",
+    ],
+    "products": {
+        "cup_single_kids": {
+            "id": "cup_single_kids",
+            "name": "Single Scoop Cup — Kids",
+            "category": "Cups",
+            "size": "Kids",
+            "scoops": 1,
+            "priceAED": 12,
+            "description": "One scoop in a kid-sized cup.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/wwweif79_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_single_value": {
+            "id": "cup_single_value",
+            "name": "Single Scoop Cup — Value",
+            "category": "Cups",
+            "size": "Value",
+            "scoops": 1,
+            "priceAED": 16,
+            "description": "One full scoop in a value-sized cup.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/7ysjfilv_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_single_emlaaq": {
+            "id": "cup_single_emlaaq",
+            "name": "Single Scoop Cup — Emlaaq",
+            "category": "Cups",
+            "size": "Emlaaq",
+            "scoops": 1,
+            "priceAED": 20,
+            "description": "One generous Emlaaq scoop.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/ceeoxr60_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_double_kids": {
+            "id": "cup_double_kids",
+            "name": "Double Scoops Cup — Kids",
+            "category": "Cups",
+            "size": "Kids",
+            "scoops": 2,
+            "priceAED": 21,
+            "description": "Two kid-sized scoops.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/pk1npics_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_double_value": {
+            "id": "cup_double_value",
+            "name": "Double Scoops Cup — Value",
+            "category": "Cups",
+            "size": "Value",
+            "scoops": 2,
+            "priceAED": 28,
+            "description": "Two value scoops — mix flavors freely.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/bw2cs7ou_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_double_emlaaq": {
+            "id": "cup_double_emlaaq",
+            "name": "Double Scoops Cup — Emlaaq",
+            "category": "Cups",
+            "size": "Emlaaq",
+            "scoops": 2,
+            "priceAED": 37,
+            "description": "Two large Emlaaq scoops.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8jj0qlin_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_triple_kids": {
+            "id": "cup_triple_kids",
+            "name": "Triple Scoops Cup — Kids",
+            "category": "Cups",
+            "size": "Kids",
+            "scoops": 3,
+            "priceAED": 30,
+            "description": "Three kid-sized scoops.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/bd4a3wvg_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_triple_value": {
+            "id": "cup_triple_value",
+            "name": "Triple Scoops Cup — Value",
+            "category": "Cups",
+            "size": "Value",
+            "scoops": 3,
+            "priceAED": 35,
+            "description": "Three classic scoops — mix & match.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i4cehyc6_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "cup_triple_emlaaq": {
+            "id": "cup_triple_emlaaq",
+            "name": "Triple Scoops Cup — Emlaaq",
+            "category": "Cups",
+            "size": "Emlaaq",
+            "scoops": 3,
+            "priceAED": 40,
+            "description": "Three large Emlaaq scoops.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i4cehyc6_0.jpg",
+            "display": "Ice Cream Bar",
+        },
+        "sundae_single_kids": {
+            "id": "sundae_single_kids",
+            "name": "Single Sundae — Kids",
+            "category": "Sundae Cups",
+            "size": "Kids",
+            "scoops": 1,
+            "priceAED": 18,
+            "includedToppings": 2,
+            "description": "Kids sundae with sauces & basic toppings.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/qwwyrap1_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_single_value": {
+            "id": "sundae_single_value",
+            "name": "Single Sundae — Value",
+            "category": "Sundae Cups",
+            "size": "Value",
+            "scoops": 1,
+            "priceAED": 22,
+            "includedToppings": 2,
+            "description": "Value sundae with sauce and toppings.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i36szhpa_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_single_emlaaq": {
+            "id": "sundae_single_emlaaq",
+            "name": "Single Sundae — Emlaaq",
+            "category": "Sundae Cups",
+            "size": "Emlaaq",
+            "scoops": 1,
+            "priceAED": 28,
+            "includedToppings": 3,
+            "description": "Emlaaq sundae with extra toppings.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8d6mjr6e_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_double_kids": {
+            "id": "sundae_double_kids",
+            "name": "Double Sundae — Kids",
+            "category": "Sundae Cups",
+            "size": "Kids",
+            "scoops": 2,
+            "priceAED": 25,
+            "includedToppings": 2,
+            "description": "Two-scoop kids sundae.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/su3lvwpc_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_double_value": {
+            "id": "sundae_double_value",
+            "name": "Double Sundae — Value",
+            "category": "Sundae Cups",
+            "size": "Value",
+            "scoops": 2,
+            "priceAED": 30,
+            "includedToppings": 2,
+            "description": "Two-scoop value sundae.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/hp4r5kzc_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_double_emlaaq": {
+            "id": "sundae_double_emlaaq",
+            "name": "Double Sundae — Emlaaq",
+            "category": "Sundae Cups",
+            "size": "Emlaaq",
+            "scoops": 2,
+            "priceAED": 35,
+            "includedToppings": 2,
+            "description": "Two-scoop Emlaaq sundae.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8d6mjr6e_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_triple_kids": {
+            "id": "sundae_triple_kids",
+            "name": "Triple Sundae — Kids",
+            "category": "Sundae Cups",
+            "size": "Kids",
+            "scoops": 3,
+            "priceAED": 30,
+            "includedToppings": 2,
+            "description": "Three-scoop kids sundae.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_triple_value": {
+            "id": "sundae_triple_value",
+            "name": "Triple Sundae — Value",
+            "category": "Sundae Cups",
+            "size": "Value",
+            "scoops": 3,
+            "priceAED": 35,
+            "includedToppings": 2,
+            "description": "Three-scoop value sundae.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "sundae_triple_emlaaq": {
+            "id": "sundae_triple_emlaaq",
+            "name": "Triple Sundae — Emlaaq",
+            "category": "Sundae Cups",
+            "size": "Emlaaq",
+            "scoops": 3,
+            "priceAED": 40,
+            "includedToppings": 2,
+            "description": "Three-scoop Emlaaq sundae.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
+            "display": "Sundae Counter",
+        },
+        "shake_chocolate_chiller_regular": {
+            "id": "shake_chocolate_chiller_regular",
+            "name": "Chocolate Chiller Thick Shake — Regular",
+            "category": "Milk Shakes",
+            "size": "Regular",
+            "priceAED": 27,
+            "description": "Chocolate mousse royale ice cream with vanilla ice cream..",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/nhk3ekf4_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_chocolate_chiller_large": {
+            "id": "shake_chocolate_chiller_large",
+            "name": "Chocolate Chiller Thick Shake — Large",
+            "category": "Milk Shakes",
+            "size": "Large",
+            "priceAED": 32,
+            "description": "Chocolate mousse royale ice cream with vanilla ice cream.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/igdoeihc_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_strawberry_mania_regular": {
+            "id": "shake_strawberry_mania_regular",
+            "name": "Strawberry Mania Thick Shake — Regular",
+            "category": "Milk Shakes",
+            "size": "Regular",
+            "priceAED": 27,
+            "description": "Vanilla and very berry strawberry ice cream with banana pieces.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i1yr0rqp_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_strawberry_mania_large": {
+            "id": "shake_strawberry_mania_large",
+            "name": "Strawberry Mania Thick Shake — Large",
+            "category": "Milk Shakes",
+            "size": "Large",
+            "priceAED": 30,
+            "description": "Vanilla and very berry strawberry ice cream with banana pieces..",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/aggee5ui_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_jamoca_fudge_regular": {
+            "id": "shake_jamoca_fudge_regular",
+            "name": "Jamoca Fudge Thick Shake — Regular",
+            "category": "Milk Shakes",
+            "size": "Regular",
+            "priceAED": 27,
+            "description": "Jamoca almond fudge ice cream.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/h3cmi7b7_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_jamoca_fudge_large": {
+            "id": "shake_jamoca_fudge_large",
+            "name": "Jamoca Fudge Thick Shake — Large",
+            "category": "Milk Shakes",
+            "size": "Large",
+            "priceAED": 32,
+            "description": "Jamoca almond fudge ice cream.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/9i34ocls_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_praline_pleasure_regular": {
+            "id": "shake_praline_pleasure_regular",
+            "name": "Praline Pleasure Thick Shake — Regular",
+            "category": "Milk Shakes",
+            "size": "Regular",
+            "priceAED": 27,
+            "description": "Pralines n cream ice cream with Jamoca almond fudge ice cream.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/luqwa7y8_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_praline_pleasure_large": {
+            "id": "shake_praline_pleasure_large",
+            "name": "Praline Pleasure Thick Shake — Large",
+            "category": "Milk Shakes",
+            "size": "Large",
+            "priceAED": 32,
+            "description": "Pralines cream ice cream with Jamoca almond fudge ice cream.",
+            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/5n85jghc_0.jpg",
+            "display": "Milkshake Bar",
+        },
+        "shake_make_own_regular": {
+            "id": "shake_make_own_regular",
+            "name": "Make Your Own Thick Shake — Regular (3 Scoops)",
+            "category": "Milk Shakes",
+            "size": "Regular",
+            "scoops": 3,
+            "priceAED": 25,
+            "description": "Choose 3 flavors each with 2.5 ounce per scoop + unlimited toppings (charged).",
+            "allowedFlavorNames": [
+                "Chocolate",
+                "Chocolate Chip",
+                "Chocolate Mousse Royale",
+                "World Class Chocolate",
+                "Strawberry Cheesecake",
+                "Very Berry Strawberry",
+                "Blue Berry Crumble",
+                "Cookies N Cream",
+                "Gold Medal Ribbon",
+                "Jamoca Almond Fudge",
+                "Mint Chocolate Chip",
+                "Pralines N Cream",
+                "Vanilla",
+                "Love Potion 31",
+                "Rainbow Sherbet",
+                "Nsa Caramel Turtle",
+                "Mango Sticky Rice",
+                "German Chocolate Cake",
+                "Cotton Candy",
+                "Maui Brownie Madness",
+                "Base Ball Nut",
+                "Citrus Twist",
+                "Pistachio Almond",
+                "Peanut Butter N Chocolate",
+                "Chocolate Chip Cookie Dough",
+            ],
+            "imageUrl": "https://dummyimage.com/200x200/efefef/222222&text=Make+Your+Own+Shake",
+            "display": "Milkshake Bar",
+        },
     },
-    "cup_double_kids": {
-      "id": "cup_double_kids",
-      "name": "Double Scoops Cup — Kids",
-      "category": "Cups",
-      "size": "Kids",
-      "scoops": 2,
-      "priceAED": 21,
-      "description": "Two kid-sized scoops.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/pk1npics_0.jpg",
-      "display": "Ice Cream Bar"
-    },
-    "cup_double_value": {
-      "id": "cup_double_value",
-      "name": "Double Scoops Cup — Value",
-      "category": "Cups",
-      "size": "Value",
-      "scoops": 2,
-      "priceAED": 28,
-      "description": "Two value scoops — mix flavors freely.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/bw2cs7ou_0.jpg",
-      "display": "Ice Cream Bar"
-    },
-    "cup_double_emlaaq": {
-      "id": "cup_double_emlaaq",
-      "name": "Double Scoops Cup — Emlaaq",
-      "category": "Cups",
-      "size": "Emlaaq",
-      "scoops": 2,
-      "priceAED": 37,
-      "description": "Two large Emlaaq scoops.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8jj0qlin_0.jpg",
-      "display": "Ice Cream Bar"
-    },
-    "cup_triple_kids": {
-      "id": "cup_triple_kids",
-      "name": "Triple Scoops Cup — Kids",
-      "category": "Cups",
-      "size": "Kids",
-      "scoops": 3,
-      "priceAED": 30,
-      "description": "Three kid-sized scoops.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/bd4a3wvg_0.jpg",
-      "display": "Ice Cream Bar"
-    },
-    "cup_triple_value": {
-      "id": "cup_triple_value",
-      "name": "Triple Scoops Cup — Value",
-      "category": "Cups",
-      "size": "Value",
-      "scoops": 3,
-      "priceAED": 35,
-      "description": "Three classic scoops — mix & match.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i4cehyc6_0.jpg",
-      "display": "Ice Cream Bar"
-    },
-    "cup_triple_emlaaq": {
-      "id": "cup_triple_emlaaq",
-      "name": "Triple Scoops Cup — Emlaaq",
-      "category": "Cups",
-      "size": "Emlaaq",
-      "scoops": 3,
-      "priceAED": 40,
-      "description": "Three large Emlaaq scoops.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i4cehyc6_0.jpg",
-      "display": "Ice Cream Bar"
-    },
-    "sundae_single_kids": {
-      "id": "sundae_single_kids",
-      "name": "Single Sundae — Kids",
-      "category": "Sundae Cups",
-      "size": "Kids",
-      "scoops": 1,
-      "priceAED": 18,
-      "includedToppings": 2,
-      "description": "Kids sundae with sauces & basic toppings.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/qwwyrap1_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_single_value": {
-      "id": "sundae_single_value",
-      "name": "Single Sundae — Value",
-      "category": "Sundae Cups",
-      "size": "Value",
-      "scoops": 1,
-      "priceAED": 22,
-      "includedToppings": 2,
-      "description": "Value sundae with sauce and toppings.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i36szhpa_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_single_emlaaq": {
-      "id": "sundae_single_emlaaq",
-      "name": "Single Sundae — Emlaaq",
-      "category": "Sundae Cups",
-      "size": "Emlaaq",
-      "scoops": 1,
-      "priceAED": 28,
-      "includedToppings": 3,
-      "description": "Emlaaq sundae with extra toppings.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8d6mjr6e_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_double_kids": {
-      "id": "sundae_double_kids",
-      "name": "Double Sundae — Kids",
-      "category": "Sundae Cups",
-      "size": "Kids",
-      "scoops": 2,
-      "priceAED": 25,
-      "includedToppings": 2,
-      "description": "Two-scoop kids sundae.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/su3lvwpc_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_double_value": {
-      "id": "sundae_double_value",
-      "name": "Double Sundae — Value",
-      "category": "Sundae Cups",
-      "size": "Value",
-      "scoops": 2,
-      "priceAED": 30,
-      "includedToppings": 2,
-      "description": "Two-scoop value sundae.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/hp4r5kzc_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_double_emlaaq": {
-      "id": "sundae_double_emlaaq",
-      "name": "Double Sundae — Emlaaq",
-      "category": "Sundae Cups",
-      "size": "Emlaaq",
-      "scoops": 2,
-      "priceAED": 35,
-      "includedToppings": 2,
-      "description": "Two-scoop Emlaaq sundae.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8d6mjr6e_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_triple_kids": {
-      "id": "sundae_triple_kids",
-      "name": "Triple Sundae — Kids",
-      "category": "Sundae Cups",
-      "size": "Kids",
-      "scoops": 3,
-      "priceAED": 30,
-      "includedToppings": 2,
-      "description": "Three-scoop kids sundae.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_triple_value": {
-      "id": "sundae_triple_value",
-      "name": "Triple Sundae — Value",
-      "category": "Sundae Cups",
-      "size": "Value",
-      "scoops": 3,
-      "priceAED": 35,
-      "includedToppings": 2,
-      "description": "Three-scoop value sundae.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "sundae_triple_emlaaq": {
-      "id": "sundae_triple_emlaaq",
-      "name": "Triple Sundae — Emlaaq",
-      "category": "Sundae Cups",
-      "size": "Emlaaq",
-      "scoops": 3,
-      "priceAED": 40,
-      "includedToppings": 2,
-      "description": "Three-scoop Emlaaq sundae.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
-      "display": "Sundae Counter"
-    },
-    "shake_chocolate_chiller_regular": {
-      "id": "shake_chocolate_chiller_regular",
-      "name": "Chocolate Chiller Thick Shake — Regular",
-      "category": "Milk Shakes",
-      "size": "Regular",
-      "priceAED": 27,
-      "description": "Chocolate mousse royale ice cream with vanilla ice cream..",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/nhk3ekf4_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_chocolate_chiller_large": {
-      "id": "shake_chocolate_chiller_large",
-      "name": "Chocolate Chiller Thick Shake — Large",
-      "category": "Milk Shakes",
-      "size": "Large",
-      "priceAED": 32,
-      "description": "Chocolate mousse royale ice cream with vanilla ice cream.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/igdoeihc_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_strawberry_mania_regular": {
-      "id": "shake_strawberry_mania_regular",
-      "name": "Strawberry Mania Thick Shake — Regular",
-      "category": "Milk Shakes",
-      "size": "Regular",
-      "priceAED": 27,
-      "description": "Vanilla and very berry strawberry ice cream with banana pieces.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i1yr0rqp_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_strawberry_mania_large": {
-      "id": "shake_strawberry_mania_large",
-      "name": "Strawberry Mania Thick Shake — Large",
-      "category": "Milk Shakes",
-      "size": "Large",
-      "priceAED": 30,
-      "description": "Vanilla and very berry strawberry ice cream with banana pieces..",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/aggee5ui_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_jamoca_fudge_regular": {
-      "id": "shake_jamoca_fudge_regular",
-      "name": "Jamoca Fudge Thick Shake — Regular",
-      "category": "Milk Shakes",
-      "size": "Regular",
-      "priceAED": 27,
-      "description": "Jamoca almond fudge ice cream.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/h3cmi7b7_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_jamoca_fudge_large": {
-      "id": "shake_jamoca_fudge_large",
-      "name": "Jamoca Fudge Thick Shake — Large",
-      "category": "Milk Shakes",
-      "size": "Large",
-      "priceAED": 32,
-      "description": "Jamoca almond fudge ice cream.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/9i34ocls_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_praline_pleasure_regular": {
-      "id": "shake_praline_pleasure_regular",
-      "name": "Praline Pleasure Thick Shake — Regular",
-      "category": "Milk Shakes",
-      "size": "Regular",
-      "priceAED": 27,
-      "description": "Pralines n cream ice cream with Jamoca almond fudge ice cream.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/luqwa7y8_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_praline_pleasure_large": {
-      "id": "shake_praline_pleasure_large",
-      "name": "Praline Pleasure Thick Shake — Large",
-      "category": "Milk Shakes",
-      "size": "Large",
-      "priceAED": 32,
-      "description": "Pralines cream ice cream with Jamoca almond fudge ice cream.",
-      "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/5n85jghc_0.jpg",
-      "display": "Milkshake Bar"
-    },
-    "shake_make_own_regular": {
-      "id": "shake_make_own_regular",
-      "name": "Make Your Own Thick Shake — Regular (3 Scoops)",
-      "category": "Milk Shakes",
-      "size": "Regular",
-      "scoops": 3,
-      "priceAED": 25,
-      "description": "Choose 3 flavors each with 2.5 ounce per scoop + unlimited toppings (charged).",
-      "allowedFlavorNames": [
-        "Chocolate", "Chocolate Chip", "Chocolate Mousse Royale", "World Class Chocolate",
-        "Strawberry Cheesecake", "Very Berry Strawberry", "Blue Berry Crumble",
-        "Cookies N Cream", "Gold Medal Ribbon", "Jamoca Almond Fudge", "Mint Chocolate Chip",
-        "Pralines N Cream", "Vanilla", "Love Potion 31", "Rainbow Sherbet",
-        "Nsa Caramel Turtle", "Mango Sticky Rice", "German Chocolate Cake",
-        "Cotton Candy", "Maui Brownie Madness", "Base Ball Nut",
-        "Citrus Twist", "Pistachio Almond", "Peanut Butter N Chocolate",
-        "Chocolate Chip Cookie Dough"
-      ],
-      "imageUrl": "https://dummyimage.com/200x200/efefef/222222&text=Make+Your+Own+Shake",
-      "display": "Milkshake Bar"
-    }
-  },
-  "flavors": [
-    { "id": "flv_chocolate", "name": "Chocolate", "classification": "choco", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Chocolate.jpg", "available": "yes" },
-    { "id": "flv_chocolate_chip", "name": "Chocolate Chip", "classification": "choco", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Chocolate-Chip.jpg", "available": "yes" },
-    { "id": "flv_chocolate_mousse_royale", "name": "Chocolate Mousse Royale", "classification": "choco", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Chocolate-Mousse-Royale.jpg", "available": "yes" },
-    { "id": "flv_world_class_chocolate", "name": "World Class Chocolate", "classification": "choco", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/World-Class-Chocolate.jpg", "available": "yes" },
-    { "id": "flv_strawberry_cheesecake", "name": "Strawberry Cheesecake", "classification": "berry", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Strawberry-Cheese-Cake.jpg", "available": "yes" },
-    { "id": "flv_very_berry_strawberry", "name": "Very Berry Strawberry", "classification": "berry", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/verY-berry-strawberry.jpg", "available": "yes" },
-    { "id": "flv_blue_berry_crumble", "name": "Blue Berry Crumble", "classification": "berry", "imageUrl": "https://res.cloudinary.com/dslutbftw/image/upload/v1763288485/Screenshot_2025-11-16_154743_yccg7x.png", "available": "yes" },
-    { "id": "flv_cookies_n_cream", "name": "Cookies N Cream", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Cookies-N-Cream.jpg", "available": "yes" },
-    { "id": "flv_gold_medal_ribbon", "name": "Gold Medal Ribbon", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Gold-Medal-Ribbon.jpg", "available": "yes" },
-    { "id": "flv_jamoca_almond_fudge", "name": "Jamoca Almond Fudge", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Jamoca-Almond-Fudge.jpg", "available": "yes" },
-    { "id": "flv_mint_chocolate_chip", "name": "Mint Chocolate Chip", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Mint-Chocolate-Chip.jpg", "available": "yes" },
-    { "id": "flv_pralines_n_cream", "name": "Pralines N Cream", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Pralines-N-Cream.jpg", "available": "yes" },
-    { "id": "flv_vanilla", "name": "Vanilla", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Vanilla.jpg", "available": "yes" },
-    { "id": "flv_love_potion_31", "name": "Love Potion 31", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Love-Portion-31.jpg", "available": "yes" },
-    { "id": "flv_rainbow_sherbet", "name": "Rainbow Sherbet", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Rainbow-Sherbet.jpg", "available": "yes" },
-    { "id": "flv_nsa_caramel_turtle", "name": "Nsa Caramel Turtle", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/NSA-Caramel-Turtle.jpg", "available": "yes" },
-    { "id": "flv_mango_sticky_rice", "name": "Mango Sticky Rice", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/06/It-takes-two-to-mango.jpg", "available": "yes" },
-    { "id": "flv_german_chocolate_cake", "name": "German Chocolate Cake", "classification": "others", "imageUrl": "https://cdn.trendhunterstatic.com/thumbs/546/german-chocolate-cake-ice-cream.jpeg", "available": "yes" },
-    { "id": "flv_cotton_candy", "name": "Cotton Candy", "classification": "others", "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Cotton-Candy.jpg", "available": "yes" },
-    { "id": "flv_sugarless", "name": "SugarLess", "classification": "sugarless", "imageUrl": "null", "available": "no" }
-  ],
-  "toppings": [
-    { "id": "top_hot_butterscotch", "name": "Hot Butterscotch", "priceAED": 5, "imageUrl": "https://thecafesucrefarine.com/wp-content/uploads/Ridiculously-Easy-Butterscotch-Sauce-1.jpg" },
-    { "id": "top_hot_fudge", "name": "Hot Fudge", "priceAED": 5, "imageUrl": "https://images.squarespace-cdn.com/content/v1/58e2595c3e00be0ae51453aa/1725237286880-PCLY565558ZWKOM6OUHZ/hot+fudge-12.jpg" },
-    { "id": "top_strawberry", "name": "Strawberry", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/7/79/Icecream_with_strawberry_sauce.jpg" },
-    { "id": "top_chocolate_syrup", "name": "Chocolate Syrup", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/d/d4/Chocolate_syrup_topping_on_ice_cream.JPG" },
-    { "id": "top_almonds_diced", "name": "Almonds Diced", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/a/af/Bowl_of_chopped_almonds_no_bg.png" },
-    { "id": "top_mms", "name": "M&M's", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/e/e5/Plain-M%26Ms-Pile.jpg" },
-    { "id": "top_kitkat_crush", "name": "Kitkat Crush", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/f/fc/Kit-Kat-Split.jpg" },
-    { "id": "top_rainbow_sprinkles", "name": "Rainbow Sprinkles", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/e/e2/Colored_sprinkles.jpg" },
-    { "id": "top_chocolate_sprinkles", "name": "Chocolate Sprinkles", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/3/37/Hagelslag_chocolate_sprinkles.jpg" },
-    { "id": "top_pink_white_marshmallow", "name": "Pink & White Marshmallow", "priceAED": 5, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/c/ca/Pink_Marshmallows.jpg" },
-    { "id": "top_maltesers", "name": "Maltesers", "priceAED": 6, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/4/48/Maltesers-Pile-and-Split.jpg" },
-    { "id": "top_mms_peanut", "name": "M&M's Peanut", "priceAED": 6, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/a/aa/M%26m1.jpg" },
-    { "id": "top_skittles", "name": "Skittles", "priceAED": 6, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/8/81/Skittles-Candies-Pile.jpg" },
-    { "id": "top_haribo_gold_bears", "name": "Haribo Gold Bears", "priceAED": 6, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/b/bd/Haribo_gb.jpg" },
-    { "id": "top_haribo_raspberry_blackberry", "name": "Haribo Raspberry & Blackberry", "priceAED": 6, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/6/6a/Haribo_Gelee-Himbeeren_und_-Brombeeren-5468.jpg" },
-    { "id": "top_pistachio_diced_roasted", "name": "Pistachio Diced Roasted", "priceAED": 6, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/4/4b/K%C3%BCnefe_-_pistachio.jpg" },
-    { "id": "top_nutella", "name": "Nutella", "priceAED": 6, "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/9/9b/Nutella_ak.jpg" },
-    { "id": "top_pistachio_liquid", "name": "Pistachio Liquid Topping", "priceAED": 6, "imageUrl": "https://www.loveandoliveoil.com/wp-content/uploads/2025/04/homemade-pistachio-syrup-1.jpg" }
-  ]
+    "flavors": [
+        {
+            "id": "flv_chocolate",
+            "name": "Chocolate",
+            "classification": "choco",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Chocolate.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_chocolate_chip",
+            "name": "Chocolate Chip",
+            "classification": "choco",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Chocolate-Chip.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_chocolate_mousse_royale",
+            "name": "Chocolate Mousse Royale",
+            "classification": "choco",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Chocolate-Mousse-Royale.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_world_class_chocolate",
+            "name": "World Class Chocolate",
+            "classification": "choco",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/World-Class-Chocolate.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_strawberry_cheesecake",
+            "name": "Strawberry Cheesecake",
+            "classification": "berry",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Strawberry-Cheese-Cake.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_very_berry_strawberry",
+            "name": "Very Berry Strawberry",
+            "classification": "berry",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/verY-berry-strawberry.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_blue_berry_crumble",
+            "name": "Blue Berry Crumble",
+            "classification": "berry",
+            "imageUrl": "https://res.cloudinary.com/dslutbftw/image/upload/v1763288485/Screenshot_2025-11-16_154743_yccg7x.png",
+            "available": "yes",
+        },
+        {
+            "id": "flv_cookies_n_cream",
+            "name": "Cookies N Cream",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Cookies-N-Cream.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_gold_medal_ribbon",
+            "name": "Gold Medal Ribbon",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Gold-Medal-Ribbon.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_jamoca_almond_fudge",
+            "name": "Jamoca Almond Fudge",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Jamoca-Almond-Fudge.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_mint_chocolate_chip",
+            "name": "Mint Chocolate Chip",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Mint-Chocolate-Chip.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_pralines_n_cream",
+            "name": "Pralines N Cream",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Pralines-N-Cream.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_vanilla",
+            "name": "Vanilla",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Vanilla.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_love_potion_31",
+            "name": "Love Potion 31",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Love-Portion-31.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_rainbow_sherbet",
+            "name": "Rainbow Sherbet",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Rainbow-Sherbet.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_nsa_caramel_turtle",
+            "name": "Nsa Caramel Turtle",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/NSA-Caramel-Turtle.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_mango_sticky_rice",
+            "name": "Mango Sticky Rice",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/06/It-takes-two-to-mango.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_german_chocolate_cake",
+            "name": "German Chocolate Cake",
+            "classification": "others",
+            "imageUrl": "https://cdn.trendhunterstatic.com/thumbs/546/german-chocolate-cake-ice-cream.jpeg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_cotton_candy",
+            "name": "Cotton Candy",
+            "classification": "others",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Cotton-Candy.jpg",
+            "available": "yes",
+        },
+        {
+            "id": "flv_sugarless",
+            "name": "SugarLess",
+            "classification": "sugarless",
+            "imageUrl": "null",
+            "available": "no",
+        },
+    ],
+    "toppings": [
+        {
+            "id": "top_hot_butterscotch",
+            "name": "Hot Butterscotch",
+            "priceAED": 5,
+            "imageUrl": "https://thecafesucrefarine.com/wp-content/uploads/Ridiculously-Easy-Butterscotch-Sauce-1.jpg",
+        },
+        {
+            "id": "top_hot_fudge",
+            "name": "Hot Fudge",
+            "priceAED": 5,
+            "imageUrl": "https://images.squarespace-cdn.com/content/v1/58e2595c3e00be0ae51453aa/1725237286880-PCLY565558ZWKOM6OUHZ/hot+fudge-12.jpg",
+        },
+        {
+            "id": "top_strawberry",
+            "name": "Strawberry",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/7/79/Icecream_with_strawberry_sauce.jpg",
+        },
+        {
+            "id": "top_chocolate_syrup",
+            "name": "Chocolate Syrup",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/d/d4/Chocolate_syrup_topping_on_ice_cream.JPG",
+        },
+        {
+            "id": "top_almonds_diced",
+            "name": "Almonds Diced",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/a/af/Bowl_of_chopped_almonds_no_bg.png",
+        },
+        {
+            "id": "top_mms",
+            "name": "M&M's",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/e/e5/Plain-M%26Ms-Pile.jpg",
+        },
+        {
+            "id": "top_kitkat_crush",
+            "name": "Kitkat Crush",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/f/fc/Kit-Kat-Split.jpg",
+        },
+        {
+            "id": "top_rainbow_sprinkles",
+            "name": "Rainbow Sprinkles",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/e/e2/Colored_sprinkles.jpg",
+        },
+        {
+            "id": "top_chocolate_sprinkles",
+            "name": "Chocolate Sprinkles",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/3/37/Hagelslag_chocolate_sprinkles.jpg",
+        },
+        {
+            "id": "top_pink_white_marshmallow",
+            "name": "Pink & White Marshmallow",
+            "priceAED": 5,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/c/ca/Pink_Marshmallows.jpg",
+        },
+        {
+            "id": "top_maltesers",
+            "name": "Maltesers",
+            "priceAED": 6,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/4/48/Maltesers-Pile-and-Split.jpg",
+        },
+        {
+            "id": "top_mms_peanut",
+            "name": "M&M's Peanut",
+            "priceAED": 6,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/a/aa/M%26m1.jpg",
+        },
+        {
+            "id": "top_skittles",
+            "name": "Skittles",
+            "priceAED": 6,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/8/81/Skittles-Candies-Pile.jpg",
+        },
+        {
+            "id": "top_haribo_gold_bears",
+            "name": "Haribo Gold Bears",
+            "priceAED": 6,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/b/bd/Haribo_gb.jpg",
+        },
+        {
+            "id": "top_haribo_raspberry_blackberry",
+            "name": "Haribo Raspberry & Blackberry",
+            "priceAED": 6,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/6/6a/Haribo_Gelee-Himbeeren_und_-Brombeeren-5468.jpg",
+        },
+        {
+            "id": "top_pistachio_diced_roasted",
+            "name": "Pistachio Diced Roasted",
+            "priceAED": 6,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/4/4b/K%C3%BCnefe_-_pistachio.jpg",
+        },
+        {
+            "id": "top_nutella",
+            "name": "Nutella",
+            "priceAED": 6,
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/9/9b/Nutella_ak.jpg",
+        },
+        {
+            "id": "top_pistachio_liquid",
+            "name": "Pistachio Liquid Topping",
+            "priceAED": 6,
+            "imageUrl": "https://www.loveandoliveoil.com/wp-content/uploads/2025/04/homemade-pistachio-syrup-1.jpg",
+        },
+    ],
 }
 
-# Normalize numeric prices
+# Normalize product prices
 for _p in SCOOP_KB.get("products", {}).values():
     try:
-        _p["priceAED"] = round(float(_p.get("priceAED") or 0.0), 2) if _p.get("priceAED") is not None else None
+        _p["priceAED"] = (
+            round(float(_p.get("priceAED") or 0.0), 2)
+            if _p.get("priceAED") is not None
+            else None
+        )
     except (TypeError, ValueError):
         _p["priceAED"] = None
 
+
 # ==========================
-# Agent Configuration Helper
+# Agent Configuration (Updated for Deepgram/Google/Cartesia)
 # ==========================
+
+
 class AgentConfig:
     def __init__(self) -> None:
         self.livekit_url = os.getenv("LIVEKIT_URL", "")
@@ -636,9 +995,15 @@ class AgentConfig:
             .lower()
             .replace(" ", "-")
         )
-        self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
-        self.openai_realtime_model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview")
-        self.openai_realtime_voice = os.getenv("OPENAI_REALTIME_VOICE", "coral")
+        # --- CHANGED: Keys for new pipeline ---
+        self.google_api_key = os.getenv("GOOGLE_API_KEY", "")
+        self.google_model = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash-lite")
+        self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
+        self.cartesia_api_key = os.getenv("CARTESIA_API_KEY", "")
+        self.cartesia_voice_id = os.getenv(
+            "CARTESIA_VOICE_ID", "829ccd10-f8b3-43cd-b8a0-4aeaa81f3b30"
+        )
+
         self.anam_api_key = os.getenv("ANAM_API_KEY", "")
         self.anam_avatar_id = os.getenv("ANAM_AVATAR_ID", "")
         self._validate()
@@ -647,13 +1012,17 @@ class AgentConfig:
         required = {
             "LIVEKIT_API_KEY": self.livekit_api_key,
             "LIVEKIT_API_SECRET": self.livekit_api_secret,
-            "OPENAI_API_KEY": self.openai_api_key,
+            "GOOGLE_API_KEY": self.google_api_key,
+            "DEEPGRAM_API_KEY": self.deepgram_api_key,
+            "CARTESIA_API_KEY": self.cartesia_api_key,
             "ANAM_API_KEY": self.anam_api_key,
             "ANAM_AVATAR_ID": self.anam_avatar_id,
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
-            raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+            raise RuntimeError(
+                f"Missing required environment variables: {', '.join(missing)}"
+            )
 
     def agent_identity(self, job_id: Optional[str]) -> str:
         suffix = (job_id or secrets.token_hex(3))[-6:]
@@ -671,33 +1040,145 @@ class AgentConfig:
             "agentIdentity": agent_identity,
         }
 
+
 CONFIG = AgentConfig()
+
 # =========================
 # UI Overlay / RPC Helpers
 # =========================
+
+
 async def _publish_overlay(
     session: Optional[AgentSession],
     kind: str,
     data: Dict[str, Any],
     room: Optional[Any] = None,
 ) -> None:
-    room_obj = room or getattr(session, "room", None)
+    """
+    Publish overlay data to the UI via LiveKit data packets.
+    IMPORTANT: we now always rely on the explicit `room` argument,
+    not on `session.room`.
+    """
+    room_obj = room
     if not room_obj:
-        logger.warning("Skipping overlay '%s'; no room reference available", kind)
+        logger.warning(
+            "[OVERLAY] No room attached, skipping overlay for kind=%s", kind
+        )
         return
+
     local_participant = getattr(room_obj, "local_participant", None)
     if not local_participant:
-        logger.warning("Skipping overlay '%s'; local participant missing", kind)
+        logger.warning(
+            "[OVERLAY] No local_participant on room, skipping overlay for kind=%s",
+            kind,
+        )
         return
+
     clean_data = _sanitize_output(data)
-    message = json.dumps({"type": "ui.overlay", "payload": {"kind": kind, **clean_data}}).encode("utf-8")
+    message = json.dumps(
+        {"type": "ui.overlay", "payload": {"kind": kind, **clean_data}}
+    ).encode("utf-8")
+
+    logger.info(
+        "[OVERLAY] Publishing overlay | kind=%s | keys=%s",
+        kind,
+        list(clean_data.keys()),
+    )
     try:
         await local_participant.publish_data(message, topic=OVERLAY_TOPIC)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Failed to publish overlay '%s': %s", kind, exc)
+
+
+async def _emit_client_rpc(
+    ctx: Optional[RunContext],
+    method: str,
+    payload: Dict[str, Any],
+    session: Optional[AgentSession] = None,
+    room: Optional[Any] = None,
+) -> Optional[str]:
+    """
+    Emitting RPC to UI clients.
+
+    CRITICAL CHANGE:
+    - We no longer depend on `session.room`.
+    - We instead use explicit `room` (which is `ctx.room` / JobContext.room).
+    """
+    run_ctx = cast(Optional[RunContext], ctx) if ctx else None
+    session_obj = session  # kept for possible future use
+
+    room_obj = room
+    if not room_obj:
+        logger.error("[RPC] FAILED — No room available for method=%s", method)
+        return None
+
+    local_participant = getattr(room_obj, "local_participant", None)
+    if not local_participant:
+        logger.error(
+            "[RPC] FAILED — Room has no local_participant for method=%s", method
+        )
+        return None
+
+    local_identity = getattr(local_participant, "identity", None)
+    destinations: List[str] = []
+    for participant in room_obj.remote_participants.values():
+        identity = getattr(participant, "identity", None)
+        if not identity or identity == local_identity:
+            continue
+        attrs = getattr(participant, "attributes", {}) or {}
+        is_guest = (
+            identity.startswith("guest-")
+            or identity.startswith("guest_")
+            or attrs.get("role") == "guest"
+        )
+        if is_guest and identity not in destinations:
+            destinations.append(identity)
+
+    if not destinations:
+        logger.warning(
+            "[RPC] No guest participants found for method=%s, skipping RPC", method
+        )
+        return None
+
+    clean_payload = _sanitize_output(payload)
+    payload_json = json.dumps(clean_payload)
+    dest_identity = destinations[0]
+
+    logger.info(
+        "[RPC] Attempting RPC → %s | destination=%s | payload=%s",
+        method,
+        dest_identity,
+        clean_payload,
+    )
+    try:
+        response = await local_participant.perform_rpc(
+            destination_identity=dest_identity,
+            method=method,
+            payload=payload_json,
+            response_timeout=2.0,
+        )
+        logger.info(
+            "[RPC] SUCCESS ← %s | destination=%s | response=%s",
+            method,
+            dest_identity,
+            response,
+        )
+        return response
+    except Exception as exc:
+        logger.error(
+            "[RPC] FAILED — method=%s | destination=%s | error=%s",
+            method,
+            dest_identity,
+            exc,
+        )
+        return None
+
+
 # =================
 # Tools / Functions
 # =================
+
+
 class ScoopTools:
     SIZE_ALIAS = {"small": "Kids", "value": "Value", "big": "Emlaaq", "large": "Emlaaq"}
 
@@ -711,16 +1192,19 @@ class ScoopTools:
     ) -> None:
         self.config = config
         self._session = session
-        self._room = room
+        self._room = room  # <=== IMPORTANT: store JobContext.room here
         self._controller_identity = controller_identity
         self._session_state = session_state
         self._kb = SCOOP_KB
         self._product_order: List[str] = [
-            pid for pid in self._kb.get("product_order", []) if pid in self._kb["products"]
+            pid
+            for pid in self._kb.get("product_order", [])
+            if pid in self._kb["products"]
         ]
         self._products = self._kb["products"]
         self._flavors = {f["id"]: f for f in self._kb.get("flavors", [])}
         self._toppings = {t["id"]: t for t in self._kb.get("toppings", [])}
+        # line_state stores per-product selections (no default vanilla here!)
         self._line_state: Dict[str, Dict[str, Any]] = {}
         self._cart_items: List[Dict[str, Any]] = []
         self._cart_summary: Dict[str, Any] = {}
@@ -733,172 +1217,99 @@ class ScoopTools:
         self._pending_overlays: Dict[str, Dict[str, Any]] = {}
         self._last_overlay_ack: Optional[Dict[str, Any]] = None
 
+    async def _rpc_with_context(
+        self,
+        ctx: "RunCtxParam",
+        method: str,
+        payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Wrapper around _emit_client_rpc that:
+        - calls the UI
+        - parses the response (if any)
+        - stores it into ScoopSessionState
+        - returns parsed response so tools can include it in their JSON
+        """
+        rpc_raw = await _emit_client_rpc(
+            cast(Optional[RunContext], ctx),
+            method,
+            payload,
+            session=self._session,
+            room=self._room,
+        )
+
+        rpc_parsed: Optional[Dict[str, Any]] = None
+        if rpc_raw is not None:
+            try:
+                if isinstance(rpc_raw, (str, bytes)):
+                    text = (
+                        rpc_raw.decode("utf-8")
+                        if isinstance(rpc_raw, bytes)
+                        else rpc_raw
+                    )
+                    rpc_parsed = json.loads(text)
+                elif isinstance(rpc_raw, dict):
+                    rpc_parsed = rpc_raw
+                else:
+                    rpc_parsed = {"raw": rpc_raw}
+            except Exception:
+                rpc_parsed = {"raw": rpc_raw}
+
+        # store in session state so SESSION_CONTEXT sees it
+        if self._session_state:
+            self._session_state.last_rpc_method = method
+            self._session_state.last_rpc_request = _sanitize_output(payload)
+            self._session_state.last_rpc_response = (
+                _sanitize_output(rpc_parsed) if rpc_parsed else None
+            )
+
+        return rpc_parsed
+
     def _get_catalog_context(self) -> str:
-        """Returns a compact summary of products/flavors for LLM grounding."""
         lines = ["# Product Cheat Sheet"]
         for pid in self._product_order:
             product = self._products.get(pid)
             if not product:
                 continue
-            free_scoops = int(product.get("scoops") or 0)
-            free_toppings = int(product.get("includedToppings") or 0)
-            category = (product.get("category") or "").lower()
-            name = product.get("name") or ""
-            if category == "milk shakes":
-                if "make your own" in name.lower():
-                    free_scoops = max(free_scoops, 3)
-                else:
-                    free_scoops = 0
-            lines.append(
-                f"- ID: {product.get('id')} | Name: {name} | Allowance: {free_scoops} Free Scoops, {free_toppings} Free Toppings"
-            )
-        lines.append("# Flavors")
-        for flavor in self._kb.get("flavors", [])[:15]:
-            lines.append(f"- ID: {flavor.get('id')} | Name: {flavor.get('name')}")
+            lines.append(f"- {product.get('name')} ({product.get('priceAED')} AED)")
         return "\n".join(lines)
 
-    async def _emit_client_rpc(self, ctx: "RunCtxParam", method: str, payload: Dict[str, Any]) -> None:
+    async def _publish_overlay_for_ctx(
+        self, ctx: "RunCtxParam", kind: str, data: Dict[str, Any]
+    ) -> None:
+        """
+        Helper used by tools to publish overlays.
+        Uses the stored room (self._room) rather than session.room.
+        """
         run_ctx = cast(Optional[RunContext], ctx) if ctx else None
-        session_obj = run_ctx.session if run_ctx and getattr(run_ctx, "session", None) else self._session
-        room = getattr(session_obj, "room", None) or self._room
-        if not room or not room.local_participant:
-            return
-        local_identity = getattr(room.local_participant, "identity", None)
-        destinations: List[str] = []
-        for participant in room.remote_participants.values():
-            identity = getattr(participant, "identity", None)
-            if not identity or identity == local_identity:
-                continue
-            attrs = getattr(participant, "attributes", {}) or {}
-            is_guest = identity.startswith("guest-") or identity.startswith("guest_") or attrs.get("role") == "guest"
-            if is_guest and identity not in destinations:
-                destinations.append(identity)
-        if not destinations:
-            return
-        clean_payload = _sanitize_output(payload)
-        payload_json = json.dumps(clean_payload)
-        for identity in destinations:
-            try:
-                await room.local_participant.perform_rpc(destination_identity=identity, method=method, payload=payload_json)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("RPC %s -> %s failed (ignoring): %s", method, identity, exc)
+        session_obj: AgentSession = self._session
 
-    async def _publish_overlay_for_ctx(self, ctx: "RunCtxParam", kind: str, data: Dict[str, Any]) -> None:
-        run_ctx = cast(Optional[RunContext], ctx) if ctx else None
-        session_obj = run_ctx.session if run_ctx and getattr(run_ctx, "session", None) else self._session
-        room_obj = getattr(run_ctx, "room", None) if run_ctx else None
-        if not room_obj and session_obj:
-            room_obj = getattr(session_obj, "room", None)
-        room_obj = room_obj or self._room
-        if room_obj and room_obj is not self._room:
-            # Keep the cached reference fresh in case the session rebinds rooms.
-            self._room = room_obj
-        self._attach_agent_note(kind, data)
-        overlay_id = data.get("overlayId") or secrets.token_hex(8)
-        data["overlayId"] = overlay_id
-        product_hint = data.get("contextProductId") or data.get("productId") or (
-            data.get("product", {}) if isinstance(data.get("product"), dict) else {}
-        )
-        if isinstance(product_hint, dict):
-            product_hint = product_hint.get("id")
-        self._pending_overlays[overlay_id] = {
-            "kind": kind,
-            "payload": data,
-            "createdAt": time.time(),
-            "productId": product_hint,
-        }
+        # State updates
         if self._session_state:
             self._session_state.last_overlay_kind = kind
             self._session_state.last_overlay_payload = data
-            if product_hint:
-                self._session_state.current_product_id = product_hint
-            elif kind not in {"products", "flavors", "toppings"}:
-                self._session_state.current_product_id = None
             history = self._session_state.overlay_history
             history.append(kind)
             if len(history) > 10:
                 history.pop(0)
-        logger.info(
-            "publishing overlay kind=%s overlay_id=%s product_id=%s",
-            kind,
-            overlay_id,
-            product_hint,
-        )
-        await _publish_overlay(session_obj, kind, data, room_obj)
 
-    async def handle_overlay_ack(self, payload: Dict[str, Any]) -> str:
-        overlay_id = payload.get("overlayId")
-        if not overlay_id:
-            return "error: missing overlayId"
-        record = self._pending_overlays.pop(overlay_id, None)
-        status = payload.get("status") or "shown"
-        if not record:
-            logger.warning("overlay ack for unknown id %s (status=%s)", overlay_id, status)
-            return "error: unknown overlayId"
-        ack_record = {
-            **record,
-            "ack": {
-                "status": status,
-                "receivedAt": time.time(),
-                "payload": payload,
-            },
-        }
-        self._last_overlay_ack = ack_record
-        if self._session_state:
-            self._session_state.overlay_ack_id = overlay_id
-        product_id = payload.get("productId") or record.get("productId")
-        if isinstance(product_id, dict):
-            product_id = product_id.get("id")
-        if product_id:
-            self._active_product_id = product_id
-            if self._session_state:
-                self._session_state.current_product_id = product_id
-        logger.info(
-            "Overlay ack %s (%s) status=%s product=%s",
-            overlay_id,
-            record.get("kind"),
-            status,
-            product_id,
+        await _publish_overlay(
+            session=session_obj,
+            kind=kind,
+            data=data,
+            room=self._room,
         )
-        return "ok"
 
-    def _attach_agent_note(self, kind: str, payload: Dict[str, Any]) -> None:
-        note: Optional[str] = None
-        if kind == "products":
-            view = payload.get("view")
-            if view == "grid":
-                note = (
-                    "Menu grid is visible on the kiosk. Encourage the guest to browse or name what they'd like."
-                )
-            elif view == "detail":
-                product = payload.get("product") or {}
-                name = product.get("name") or "this item"
-                note = f"The detail card for {name} is on screen. Guide them through flavors and toppings."
-        elif kind == "flavors":
-            name = payload.get("productName") or "this treat"
-            free = payload.get("freeFlavors")
-            if isinstance(free, int) and free >= 0:
-                plural = "s" if free != 1 else ""
-                note = (
-                    f"The flavor board for {name} is open. Remind the guest they have {free} free flavor{plural} "
-                    "to choose."
-                )
-            else:
-                note = f"The flavor board for {name} is open. Invite the guest to pick their scoops."
-        elif kind == "toppings":
-            name = payload.get("productName") or "this treat"
-            free = payload.get("freeToppings")
-            if isinstance(free, int) and free > 0:
-                plural = "s" if free != 1 else ""
-                note = f"Toppings for {name} are on screen. Mention they have {free} free topping{plural}."
-            else:
-                note = f"Toppings for {name} are on screen. Remind them toppings are charged."
-        elif kind == "cart":
-            note = "Cart summary is displayed. Confirm totals and ask if they need anything else."
-        elif kind == "directions":
-            note = "Directions are visible. Guide the guest to the pickup counter."
-        if note:
-            payload["agentNote"] = note
+    def _canonical_display(self, raw: Optional[str]) -> Optional[str]:
+        if not raw:
+            return None
+        displays = self._kb.get("displays", {})
+        if raw in displays:
+            return displays[raw].get("displayName") or raw
+        for record in displays.values():
+            if record.get("displayName") == raw:
+                return record.get("displayName")
+        return raw
 
     def _format_product_card(self, p: Dict[str, Any]) -> Dict[str, Any]:
         price = p.get("priceAED")
@@ -914,17 +1325,6 @@ class ScoopTools:
             "display": display_name,
             "includedToppings": p.get("includedToppings"),
         }
-
-    def _canonical_display(self, raw: Optional[str]) -> Optional[str]:
-        if not raw:
-            return None
-        displays = self._kb.get("displays", {})
-        if raw in displays:
-            return displays[raw].get("displayName") or raw
-        for record in displays.values():
-            if record.get("displayName") == raw:
-                return record.get("displayName")
-        return raw
 
     def _format_flavor_card(self, f: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -945,738 +1345,707 @@ class ScoopTools:
             "dietary": t.get("dietary", []),
         }
 
+    def _resolve_product(
+        self, product_id: Optional[str], query: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        if product_id:
+            return self._products.get(product_id)
+        if query:
+            q = query.lower()
+            for p in self._products.values():
+                if q in (p.get("name") or "").lower():
+                    return p
+        return None
+
+    def _get_or_create_line_state(self, product: Dict[str, Any]) -> Dict[str, Any]:
+        pid = product["id"]
+        if pid not in self._line_state:
+            self._line_state[pid] = {
+                "product": product,
+                "flavors": [],  # no default vanilla, empty until choose_flavors is called
+                "toppings": [],
+                "flavor_summary": {
+                    "free": int(product.get("scoops") or 0),
+                    "used": 0,
+                    "remainingFree": int(product.get("scoops") or 0),
+                    "extraCount": 0,
+                    "charge": Decimal(0),
+                },
+                "topping_summary": {
+                    "free": int(product.get("includedToppings") or 0),
+                    "used": 0,
+                    "remainingFree": int(product.get("includedToppings") or 0),
+                    "extraCount": 0,
+                    "charge": Decimal(0),
+                },
+            }
+        return self._line_state[pid]
+
     def _map_size_alias(self, size: Optional[str]) -> Optional[str]:
         if not size:
             return None
-        s = size.strip().lower()
-        return self.SIZE_ALIAS.get(s, size.title())
+        return self.SIZE_ALIAS.get(size.lower(), size.title())
 
-    def _resolve_catalog_entry(
-        self,
-        ref: Any,
-        entries: Dict[str, Dict[str, Any]],
-        name_index: Dict[str, List[str]],
-        token_cache: Dict[str, set[str]],
-    ) -> Optional[Dict[str, Any]]:
-        if not ref:
-            return None
-        lookup_value = ref
-        if isinstance(ref, dict):
-            lookup_value = ref.get("id") or ref.get("name")
-        if lookup_value is None:
-            return None
-        lookup_str = str(lookup_value)
-        direct = entries.get(lookup_str)
-        if direct:
-            return direct
-        normalized = _normalize_label(lookup_str)
-        if normalized:
-            for match_id in name_index.get(normalized, []):
-                match = entries.get(match_id)
-                if match:
-                    return match
-        tokens = _tokens_for_label(lookup_str)
-        if not tokens:
-            return None
-        best: Optional[Dict[str, Any]] = None
-        best_score = 0.0
-        for entry_id, entry in entries.items():
-            if entry_id not in token_cache:
-                token_cache[entry_id] = _tokens_for_label(entry.get("name"))
-            entry_tokens = token_cache[entry_id]
-            if not entry_tokens:
-                continue
-            overlap = len(tokens & entry_tokens)
-            if not overlap:
-                continue
-            coverage = overlap / len(tokens)
-            if coverage >= 1.0:
-                return entry
-            if coverage > best_score:
-                best = entry
-                best_score = coverage
-        return best if best_score >= 0.5 else None
-
-    def _resolve_flavor(self, ref: Any) -> Optional[Dict[str, Any]]:
-        return self._resolve_catalog_entry(ref, self._flavors, self._flavor_name_index, self._flavor_tokens_cache)
-
-    def _resolve_topping(self, ref: Any) -> Optional[Dict[str, Any]]:
-        return self._resolve_catalog_entry(ref, self._toppings, self._topping_name_index, self._topping_tokens_cache)
-
-    def _product_tokens(self, product: Dict[str, Any]) -> set[str]:
-        product_id = product.get("id")
-        if product_id and product_id in self._product_tokens_cache:
-            return self._product_tokens_cache[product_id]
-        tokens: set[str] = set()
-        # FIX: Removed 'self.' from _tokenize calls
-        tokens |= _tokenize(product.get("name"))
-        tokens |= _tokenize(product.get("category"))
-        tokens |= _tokenize(product.get("size"))
-        tokens |= _tokenize(" ".join(product.get("keywords", [])))
-        tokens |= _tokenize(product.get("display"))
-        if product_id:
-            self._product_tokens_cache[product_id] = tokens
-        return tokens
-
-    def _match_query_tokens(self, product: Dict[str, Any], query_tokens: set[str]) -> bool:
-        if not query_tokens:
-            return True
-        product_tokens = self._product_tokens(product)
-        return all(token in product_tokens for token in query_tokens)
-
-    def _best_token_match(self, query: str) -> Optional[Dict[str, Any]]:
-        # FIX: Removed 'self.' from _tokenize call
-        tokens = _tokenize(query)
-        if not tokens:
-            return None
-        for product in self._products.values():
-            if self._match_query_tokens(product, tokens):
-                return product
-        return None
-
-    def _default_free_toppings(self, product: Dict[str, Any]) -> int:
-        category = (product.get("category") or "").strip()
-        if category == "Sundae Cups":
-            included = product.get("includedToppings")
-            if included is None:
-                return 2
-            return int(included)
-        if category in {"Cups", "Milk Shakes"}:
-            return 0
-        return 0
-
-    def _flavor_policy(self) -> Dict[str, Any]:
-        return self._kb.get("flavor_policy", {})
-
-    def _topping_policy(self) -> Dict[str, Any]:
-        return self._kb.get("toppings_policy", {})
-
-    def _remember_product_context(self, product: Dict[str, Any], line: Dict[str, Any]) -> None:
-        if not self._session_state:
-            return
-        product_id = product.get("id")
-        self._session_state.current_product_id = product_id
-        flavor_summary = line.get("flavor_summary", {})
-        topping_summary = line.get("topping_summary", {})
-        free_flavors = int(flavor_summary.get("free", 0))
-        used_flavors = int(flavor_summary.get("used", 0))
-        remaining_flavors = max(free_flavors - used_flavors, 0)
-        free_toppings = int(topping_summary.get("free", 0))
-        used_toppings = int(topping_summary.get("used", 0))
-        remaining_toppings = max(free_toppings - used_toppings, 0)
-        product_name = product.get("name") or "this item"
-        summary = (
-            f"{product_name}: {free_flavors} free scoops ({used_flavors} used, {remaining_flavors} remaining); "
-            f"{free_toppings} free toppings ({used_toppings} used, {remaining_toppings} remaining)."
+    def _resolve_flavor(self, ref: str) -> Optional[Dict[str, Any]]:
+        return self._flavors.get(ref) or next(
+            (f for f in self._flavors.values() if f["name"].lower() == ref.lower()),
+            None,
         )
-        self._session_state.current_product_summary = summary
 
-    def _clear_product_context(self, product_id: Optional[str]) -> None:
-        if not self._session_state:
-            return
-        if product_id and self._session_state.current_product_id == product_id:
-            self._session_state.current_product_summary = None
-            self._session_state.current_product_id = None
-
-    def _get_or_create_line_state(self, product: Dict[str, Any]) -> Dict[str, Any]:
-        product_id = product.get("id")
-        if not product_id:
-            raise ValueError("Product is missing id")
-        line = self._line_state.get(product_id)
-        if line:
-            self._remember_product_context(product, line)
-            return line
-        free_flavors = int(product.get("scoops") or 0)
-        free_toppings = self._default_free_toppings(product)
-        line = {
-            "product": product,
-            "flavors": [],
-            "toppings": [],
-            "flavor_summary": {
-                "free": free_flavors,
-                "used": 0,
-                "extra": 0,
-                "charge": Decimal("0.00"),
-            },
-            "topping_summary": {
-                "free": free_toppings,
-                "used": 0,
-                "extra": 0,
-                "charge": Decimal("0.00"),
-            },
-        }
-        self._line_state[product_id] = line
-        self._remember_product_context(product, line)
-        return line
-
-    def _size_options_for(self, product: Dict[str, Any]) -> List[Dict[str, Any]]:
-        base_name = (product.get("name") or "").split("—")[0].strip()
-        category = product.get("category")
-        size_rank = {"Kids": 0, "Small": 0, "Value": 1, "Regular": 1, "Emlaaq": 2, "Large": 2}
-        options: List[Dict[str, Any]] = []
-        for other in self._products.values():
-            if category and other.get("category") != category:
-                continue
-            other_base = (other.get("name") or "").split("—")[0].strip()
-            if base_name and other_base and other_base != base_name:
-                continue
-            price = other.get("priceAED")
-            options.append(
-                {
-                    "id": other.get("id"),
-                    "size": other.get("size"),
-                    "priceAED": round(float(price), 2) if price is not None else None,
-                }
-            )
-        options.sort(key=lambda opt: size_rank.get(opt.get("size") or "", 99))
-        return options
-
-    def _resolve_product(self, product_id: Optional[str], query: Optional[str]) -> Optional[Dict[str, Any]]:
-        if product_id:
-            product = self._products.get(product_id)
-            if product:
-                return product
-        if query:
-            normalized = query.strip().lower()
-            token_match = self._best_token_match(query)
-            if token_match:
-                return token_match
-            for product in self._products.values():
-                if normalized in (product.get("id") or "").lower():
-                    return product
-                if normalized in (product.get("name") or "").lower():
-                    return product
-        return None
-
-    def _format_flavor_summary(self, line: Dict[str, Any]) -> Dict[str, Any]:
-        summary = line.get("flavor_summary", {})
-        free = int(summary.get("free", 0))
-        used = int(summary.get("used", 0))
-        extra = int(summary.get("extra", 0))
-        charge = Decimal(summary.get("charge", Decimal("0.00")))
-        total_selected = len(line.get("flavors", []))
-        denominator = free or total_selected or 0
-        label = f"Scoops used: {total_selected} / {denominator}" if denominator else f"Scoops selected: {total_selected}"
-        extra_note = None
-        if extra > 0:
-            extra_note = f"{extra} extra flavor{'s' if extra != 1 else ''} (+{charge} dirham)"
-        return {"label": label, "extraNote": extra_note}
-
-    def _format_topping_summary(self, line: Dict[str, Any]) -> Dict[str, Any]:
-        summary = line.get("topping_summary", {})
-        free_total = int(summary.get("free", 0))
-        used = int(summary.get("used", 0))
-        extra = int(summary.get("extra", 0))
-        charge = Decimal(summary.get("charge", Decimal("0.00")))
-        label = f"Free: {used}   Extra: {extra}"
-        if extra > 0 and charge > 0:
-            label = f"{label} (+{charge} dirham)"
-        return {"label": label}
-
-    def _build_product_grid_payload(
-        self,
-        category: Optional[str],
-        size: Optional[str],
-        query: Optional[str],
-    ) -> Dict[str, Any]:
-        cat_filter = (category or "").strip()
-        size_filter = self._map_size_alias(size)
-        q = (query or "").strip()
-        # FIX: Removed 'self.' from _tokenize call
-        query_tokens = _tokenize(q)
-        products: List[Dict[str, Any]] = []
-        for pid in self._product_order or list(self._products.keys()):
-            product = self._products.get(pid)
-            if not product:
-                continue
-            if cat_filter and product.get("category") != cat_filter:
-                continue
-            if size_filter and (product.get("size") or "").lower() != size_filter.lower():
-                continue
-            if q and not self._match_query_tokens(product, query_tokens):
-                continue
-            products.append(self._format_product_card(product))
-        return {
-            "kind": "products",
-            "view": "grid",
-            "category": cat_filter or "All",
-            "size": size_filter,
-            "query": query,
-            "products": products,
-            "cartSummary": self._cart_summary,
-        }
-
-    def _build_product_detail_payload(self, product: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "kind": "products",
-            "view": "detail",
-            "products": [],
-        }
-        if not product:
-            return payload
-        card = self._format_product_card(product)
-        line = self._get_or_create_line_state(product)
-        payload.update(
-            {
-                "product": card,
-                "products": [card],
-                "selectedFlavors": line.get("flavors", []),
-                "selectedToppings": line.get("toppings", []),
-                "flavorSummary": self._format_flavor_summary(line),
-                "toppingSummary": self._format_topping_summary(line),
-                "sizeOptions": self._size_options_for(product),
-                "contextProductId": product.get("id"),
-                "cartSummary": self._cart_summary,
-            }
+    def _resolve_topping(self, ref: str) -> Optional[Dict[str, Any]]:
+        return self._toppings.get(ref) or next(
+            (t for t in self._toppings.values() if t["name"].lower() == ref.lower()),
+            None,
         )
-        return payload
 
-    def _recompute_cart_summary(self) -> Dict[str, Any]:
-        subtotal = Decimal("0.00")
-        for item in self._cart_items:
-            subtotal += Decimal(str(item.get("lineTotalAED", 0.0)))
-        subtotal = subtotal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        tax = (subtotal * Decimal("0.07")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        total = (subtotal + tax).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        summary = {
-            "subtotalAED": float(subtotal),
-            "taxAED": float(tax),
-            "totalAED": float(total),
-        }
-        self._cart_summary = summary
-        return summary
+    # --- MODIFIED TOOLS: ADDING RPC CALLS & PASSING ROOM ---
 
     @function_tool(
         name="list_menu",
-        description=(
-            "Render kiosk overlays. kind='products' | 'flavors' | 'toppings'. "
-            "Products accept optional category ('Cups'|'Sundae Cups'|'Milk Shakes'), size (Kids/Value/Emlaaq/Regular/Large), "
-            "query text, view ('grid'|'detail'), and product_id when focusing on a single card. "
-            "For kind='flavors' or 'toppings' you MUST provide product_id (the active item) or the overlay will be empty."
-        ),
+        description="Render menu overlays. kind='products'|'flavors'|'toppings'.",
     )
     async def list_menu(
         self,
         kind: Annotated[
             Literal["products", "flavors", "toppings"],
-            Field(description="Which overlay to show: 'products', 'flavors', or 'toppings'."),
+            Field(description="Overlay kind"),
         ],
         category: Annotated[
-            Optional[str],
-            Field(description="Optional category filter such as 'Cups', 'Sundae Cups', or 'Milk Shakes'."),
+            Optional[str], Field(description="Filter category")
         ] = None,
         size: Annotated[
-            Optional[str],
-            Field(description="Optional size filter (Kids, Value, Emlaaq, Regular, or Large)."),
+            Optional[str], Field(description="Filter size")
         ] = None,
         query: Annotated[
-            Optional[str],
-            Field(description="When provided, filter the menu items matching this text."),
+            Optional[str], Field(description="Search text")
         ] = None,
         view: Annotated[
             Optional[Literal["grid", "detail"]],
-            Field(description="For products overlay only, 'grid' or 'detail'. Defaults to grid."),
+            Field(description="Grid or detail"),
         ] = None,
         product_id: Annotated[
-            Optional[str],
-            Field(description="Product identifier to focus detail/flavor/topping overlays on."),
+            Optional[str], Field(description="Target product ID")
         ] = None,
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
+        logger.info(
+            "[TOOL] list_menu CALLED | kind=%s | category=%s | size=%s | product_id=%s | view=%s | query=%s",
+            kind,
+            category,
+            size,
+            product_id,
+            view,
+            query,
+        )
         kind_normalized = (kind or "").strip().lower()
+
+        # ----------------------
+        # PRODUCTS OVERLAY
+        # ----------------------
         if kind_normalized == "products":
-            view_mode = (view or "").strip().lower()
-            if view_mode not in {"grid", "detail"}:
-                view_mode = "grid"
+            view_mode = view or "grid"
+            payload: Dict[str, Any] = {}
             target_product: Optional[Dict[str, Any]] = None
-            logger.info(
-                "list_menu(products) view=%s category=%s size=%s query=%s",
-                view_mode,
-                category,
-                size,
-                (query or "").strip() or None,
-            )
+
+            # DETAIL VIEW (single product card)
             if view_mode == "detail" or product_id:
-                target_product = self._resolve_product(product_id or self._active_product_id, query)
-                if not target_product and query:
-                    target_product = self._resolve_product(None, query)
-                if not target_product and self._product_order:
-                    target_product = self._products.get(self._product_order[0])
+                target_product = self._resolve_product(
+                    product_id or self._active_product_id, query
+                )
                 if target_product:
                     self._active_product_id = target_product.get("id")
-                    payload = self._build_product_detail_payload(target_product)
+
+                    # If we already have flavors/toppings in line_state, reflect them
+                    line = self._get_or_create_line_state(target_product)
+                    flavors_for_line = line.get("flavors", [])
+                    toppings_for_line = line.get("toppings", [])
+                    flavor_summary = line.get("flavor_summary", {}) or {}
+                    topping_summary = line.get("topping_summary", {}) or {}
+
+                    selected_flavors = [
+                        {
+                            "id": f["id"],
+                            "name": f["name"],
+                            "classification": f.get("classification"),
+                            "imageUrl": f.get("imageUrl"),
+                            "isExtra": idx
+                            >= int(flavor_summary.get("free", 0)),
+                        }
+                        for idx, f in enumerate(flavors_for_line)
+                    ]
+                    selected_toppings = [
+                        {
+                            "id": t["id"],
+                            "name": t["name"],
+                            "priceAED": float(t.get("priceAED") or 0.0),
+                            "imageUrl": t.get("imageUrl"),
+                            "isFree": idx
+                            < int(topping_summary.get("free", 0)),
+                        }
+                        for idx, t in enumerate(toppings_for_line)
+                    ]
+
+                    flavor_note = None
+                    if flavor_summary:
+                        used = int(flavor_summary.get("used", 0))
+                        free_slots = int(
+                            flavor_summary.get("free", 0)
+                        )
+                        extra_count = max(0, used - free_slots)
+                        charge = float(
+                            flavor_summary.get("charge", 0) or 0
+                        )
+                        flavor_note = {
+                            "label": f"{used} flavor(s) selected ({extra_count} extra)",
+                            "extraNote": f"Extra flavor charge: {charge:.2f} dirham"
+                            if charge > 0
+                            else None,
+                        }
+
+                    topping_note = None
+                    if topping_summary:
+                        used = int(topping_summary.get("used", 0))
+                        free_slots = int(
+                            topping_summary.get("free", 0)
+                        )
+                        extra_count = max(0, used - free_slots)
+                        charge = float(
+                            topping_summary.get("charge", 0) or 0
+                        )
+                        topping_note = {
+                            "label": f"{used} topping(s) selected ({extra_count} extra)",
+                            "extraNote": f"Extra topping charge: {charge:.2f} dirham"
+                            if charge > 0
+                            else None,
+                        }
+
+                    payload = {
+                        "kind": "products",
+                        "view": "detail",
+                        "product": self._format_product_card(target_product),
+                        "selectedFlavors": _sanitize_output(
+                            selected_flavors
+                        ),
+                        "selectedToppings": _sanitize_output(
+                            selected_toppings
+                        ),
+                        "flavorSummary": _sanitize_output(flavor_note)
+                        if flavor_note
+                        else None,
+                        "toppingSummary": _sanitize_output(topping_note)
+                        if topping_note
+                        else None,
+                        "contextProductId": target_product.get("id"),
+                        "cartSummary": self._cart_summary or None,
+                    }
+                    view_mode = "detail"
                 else:
-                    payload = self._build_product_grid_payload(category, size, query)
-                view_mode = "detail"
-            else:
-                payload = self._build_product_grid_payload(category, size, query)
-            payload["view"] = view_mode
+                    view_mode = "grid"
+
+            # GRID VIEW (menu grid)
+            if view_mode == "grid":
+                prods = [
+                    self._format_product_card(p)
+                    for p in self._products.values()
+                    if (not category or p.get("category") == category)
+                ]
+                payload = {
+                    "kind": "products",
+                    "view": "grid",
+                    "products": prods,
+                    "category": category or "All",
+                    "size": size,
+                    "query": query,
+                    "cartSummary": self._cart_summary or None,
+                }
+
+            # 1. Publish Overlay
             await self._publish_overlay_for_ctx(ctx, "products", payload)
-            return _sanitize_output(payload)
 
-        if kind_normalized == "flavors":
-            product = self._resolve_product(product_id or self._active_product_id, None)
-            if not product:
-                payload = {"kind": "flavors", "flavors": []}
-                await self._publish_overlay_for_ctx(ctx, "flavors", payload)
-                return _sanitize_output(payload)
-            logger.info(
-                "list_menu(flavors) product_id=%s product_name=%s free=%s",
-                product.get("id"),
-                product.get("name"),
-                product.get("scoops"),
-            )
-            line = self._get_or_create_line_state(product)
-            free_flavors = int(product.get("scoops") or 0)
-            max_flavors = max(free_flavors, len(line.get("flavors", [])))
-            payload = {
-                "kind": "flavors",
-                "productId": product.get("id"),
-                "productName": product.get("name"),
-                "freeFlavors": free_flavors,
-                "maxFlavors": max_flavors,
-                "selectedFlavorIds": [f.get("id") for f in line.get("flavors", []) if f.get("id")],
-                "selectedFlavors": line.get("flavors", []),
-                "usedFreeFlavors": int(line.get("flavor_summary", {}).get("used", 0)),
-                "extraFlavorCount": int(line.get("flavor_summary", {}).get("extra", 0)),
-                "flavors": [self._format_flavor_card(f) for f in self._kb.get("flavors", [])],
+            # 2. Notify UI via RPC (and capture response)
+            rpc_payload = {
+                "view": view_mode,
+                "category": category or "All",
+                "productId": target_product.get("id")
+                if target_product
+                else None,
+                "productName": target_product.get("name")
+                if target_product
+                else None,
             }
-            await self._publish_overlay_for_ctx(ctx, "flavors", payload)
-            return _sanitize_output(payload)
-
-        if kind_normalized == "toppings":
-            product = self._resolve_product(product_id or self._active_product_id, None)
-            if not product:
-                payload = {"kind": "toppings", "toppings": []}
-                await self._publish_overlay_for_ctx(ctx, "toppings", payload)
-                return _sanitize_output(payload)
-            logger.info(
-                "list_menu(toppings) product_id=%s product_name=%s category=%s",
-                product.get("id"),
-                product.get("name"),
-                product.get("category"),
+            ui_rpc = await self._rpc_with_context(
+                ctx, "client.menuLoaded", rpc_payload
             )
-            line = self._get_or_create_line_state(product)
-            topping_summary = line.get("topping_summary", {})
-            free_total = int(topping_summary.get("free", 0))
-            free_used = int(topping_summary.get("used", 0))
-            free_remaining = max(free_total - free_used, 0)
-            category = product.get("category")
-            if category == "Cups":
-                note = "No free toppings; all toppings are charged."
-            elif category == "Milk Shakes":
-                note = "You can add any number of toppings; each topping is charged."
-            else:
-                note = None
-            payload = {
-                "kind": "toppings",
-                "productId": product.get("id"),
-                "productName": product.get("name"),
-                "category": category,
-                "note": note,
-                "freeToppings": free_total,
-                "freeToppingsRemaining": free_remaining,
-                "selectedToppingIds": [t.get("id") for t in line.get("toppings", []) if t.get("id")],
-                "selectedToppings": line.get("toppings", []),
-                "toppings": [self._format_topping_card(t) for t in self._kb.get("toppings", [])],
-            }
-            await self._publish_overlay_for_ctx(ctx, "toppings", payload)
+
+            logger.info(
+                "[TOOL] list_menu OUTPUT → view=%s | product_count=%d",
+                view_mode,
+                len(payload.get("products", []))
+                if isinstance(payload.get("products"), list)
+                else 1,
+            )
+
+            payload["uiRpc"] = ui_rpc
+
             return _sanitize_output(payload)
 
-        return _sanitize_output({"error": "invalid kind"})
+        # ----------------------
+        # FLAVORS / TOPPINGS OVERLAYS
+        # ----------------------
+        if kind_normalized in ["flavors", "toppings"]:
+            target_product_id = product_id or self._active_product_id
+            target_product = (
+                self._products.get(target_product_id)
+                if target_product_id
+                else None
+            )
+            line = (
+                self._get_or_create_line_state(target_product)
+                if target_product
+                else None
+            )
+
+            if kind_normalized == "flavors":
+                cards = [
+                    self._format_flavor_card(f)
+                    for f in self._flavors.values()
+                ]
+                free_slots = 0
+                used = 0
+                extra_count = 0
+                selected_ids: List[str] = []
+                selected_flavors: List[Dict[str, Any]] = []
+
+                if line:
+                    flavor_summary = line.get("flavor_summary", {}) or {}
+                    free_slots = int(
+                        flavor_summary.get(
+                            "free",
+                            int(
+                                target_product.get("scoops") or 0
+                            )
+                            if target_product
+                            else 0,
+                        )
+                    )
+                    used = len(line.get("flavors", []))
+                    extra_count = max(0, used - free_slots)
+                    for idx, f in enumerate(line.get("flavors", [])):
+                        selected_ids.append(f["id"])
+                        selected_flavors.append(
+                            {
+                                "id": f["id"],
+                                "name": f["name"],
+                                "classification": f.get(
+                                    "classification"
+                                ),
+                                "imageUrl": f.get("imageUrl"),
+                                "isExtra": idx >= free_slots,
+                            }
+                        )
+
+                payload = {
+                    "kind": "flavors",
+                    "productId": target_product_id,
+                    "productName": target_product.get("name")
+                    if target_product
+                    else None,
+                    "freeFlavors": free_slots,
+                    "maxFlavors": free_slots
+                    or used
+                    or (
+                        target_product.get("scoops")
+                        if target_product
+                        else 0
+                    ),
+                    "selectedFlavorIds": selected_ids,
+                    "selectedFlavors": selected_flavors,
+                    "usedFreeFlavors": min(used, free_slots),
+                    "extraFlavorCount": extra_count,
+                    "flavors": cards,
+                }
+
+            else:  # toppings
+                cards = [
+                    self._format_topping_card(t)
+                    for t in self._toppings.values()
+                ]
+                free_slots = 0
+                selected_ids: List[str] = []
+                selected_toppings: List[Dict[str, Any]] = []
+                free_remaining = 0
+
+                if target_product:
+                    free_slots = int(
+                        target_product.get("includedToppings") or 0
+                    )
+
+                if line:
+                    topping_summary = line.get("topping_summary", {}) or {}
+                    free_slots = int(
+                        topping_summary.get("free", free_slots)
+                    )
+                    used = len(line.get("toppings", []))
+                    free_remaining = max(0, free_slots - used)
+                    for idx, t in enumerate(line.get("toppings", [])):
+                        selected_ids.append(t["id"])
+                        selected_toppings.append(
+                            {
+                                "id": t["id"],
+                                "name": t["name"],
+                                "priceAED": float(
+                                    t.get("priceAED") or 0.0
+                                ),
+                                "imageUrl": t.get("imageUrl"),
+                                "isFree": idx < free_slots,
+                            }
+                        )
+
+                payload = {
+                    "kind": "toppings",
+                    "productId": target_product_id,
+                    "productName": target_product.get("name")
+                    if target_product
+                    else None,
+                    "category": target_product.get("category")
+                    if target_product
+                    else None,
+                    "note": "Extra toppings cost 5 or 6 dirham each.",
+                    "freeToppings": free_slots,
+                    "freeToppingsRemaining": free_remaining,
+                    "selectedToppingIds": selected_ids,
+                    "selectedToppings": selected_toppings,
+                    "toppings": cards,
+                }
+
+            await self._publish_overlay_for_ctx(
+                ctx, kind_normalized, payload
+            )
+
+            # Optional: small RPC for debug/telemetry + context
+            rpc_payload = {
+                "productId": target_product_id,
+                "count": len(
+                    payload.get(
+                        "flavors"
+                        if kind_normalized == "flavors"
+                        else "toppings",
+                        [],
+                    )
+                ),
+            }
+            ui_rpc = await self._rpc_with_context(
+                ctx,
+                f"client.{kind_normalized}Loaded",
+                rpc_payload,
+            )
+
+            payload["uiRpc"] = ui_rpc
+
+            return _sanitize_output(payload)
+
+        return {"error": "invalid kind"}
 
     @function_tool(
-        name="choose_flavors",
-        description=(
-            "Attach selected flavors (by flavor_ids) to a specific product (product_id). "
-            "Enforces the max scoop count defined for that product. "
-            "Always call this with the same product_id you most recently showed via list_menu(view='detail')."
-        ),
+        name="choose_flavors", description="Attach selected flavors to product."
     )
     async def choose_flavors(
         self,
-        product_id: Annotated[str, Field(description="ID of the treat currently being configured.")],
-        flavor_ids: Annotated[
-            List[str],
-            Field(description="List of flavor IDs to attach to the treat. Honors the scoop limit."),
-        ],
+        product_id: str,
+        flavor_ids: List[str],
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         product = self._products.get(product_id)
         if not product:
-            product = self._resolve_product(product_id, None)
-            if product:
-                product_id = product.get("id", product_id)
-        if not product:
-            return {"error": f"Unknown product '{product_id}'"}
+            return {"error": "Unknown product"}
+
         line = self._get_or_create_line_state(product)
-        free_flavors = int(product.get("scoops") or 0)
-        policy = self._flavor_policy()
-        extra_price = Decimal(str(policy.get("defaultFlavorPriceAED", 0.0)))
-        selected: List[Dict[str, Any]] = []
+
         resolved_flavors: List[Dict[str, Any]] = []
-        for raw in flavor_ids:
-            flavor = self._resolve_flavor(raw)
-            if flavor:
-                resolved_flavors.append(flavor)
-        for idx, flavor in enumerate(resolved_flavors):
-            is_extra = free_flavors <= 0 or idx >= free_flavors
-            unit_price = extra_price if is_extra else Decimal("0.00")
-            selected.append(
-                {
-                    "id": flavor["id"],
-                    "name": flavor["name"],
-                    "classification": flavor.get("classification"),
-                    "imageUrl": flavor.get("imageUrl") or self._kb["image_defaults"]["square"],
-                    "isExtra": is_extra,
-                    "unitPriceAED": float(unit_price),
-                }
-            )
-        used_free = min(free_flavors, len(selected)) if free_flavors else 0
-        extra_count = max(len(selected) - free_flavors, 0) if free_flavors else len(selected)
-        extra_charge = (
-            (extra_price * extra_count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if extra_count
-            else Decimal("0.00")
+        for fid in flavor_ids:
+            f = self._resolve_flavor(fid)
+            if f:
+                resolved_flavors.append(f)
+
+        # Even if empty, we respect it and clear previous selections
+        line["flavors"] = resolved_flavors
+
+        flavor_summary = line.get("flavor_summary", {}) or {}
+        free_slots = int(flavor_summary.get("free", int(product.get("scoops") or 0)))
+        used = len(resolved_flavors)
+        extra_count = max(0, used - free_slots)
+
+        extra_price_per = Decimal(
+            str(self._kb.get("flavor_policy", {}).get("defaultFlavorPriceAED", 0.0))
         )
-        line["flavors"] = selected
-        line["flavor_summary"] = {
-            "free": free_flavors,
-            "used": used_free,
-            "extra": extra_count,
-            "charge": extra_charge,
-        }
-        detail_payload = self._build_product_detail_payload(product)
-        await self._publish_overlay_for_ctx(ctx, "products", detail_payload)
-        flavor_list = ", ".join(f.get("name") or "" for f in selected if f.get("name")) or "no flavors yet"
-        note = (
-            f"{product.get('name')} now has {len(selected)} flavor"
-            f"{'s' if len(selected) != 1 else ''} selected ({flavor_list}). "
-            f"{used_free}/{free_flavors} free scoops used."
+        extra_charge = extra_price_per * Decimal(extra_count)
+
+        remaining_free = max(free_slots - used, 0)
+
+        flavor_summary["free"] = free_slots
+        flavor_summary["used"] = used
+        flavor_summary["remainingFree"] = remaining_free
+        flavor_summary["extraCount"] = extra_count
+        flavor_summary["charge"] = extra_charge
+        line["flavor_summary"] = flavor_summary
+
+        # Update detail product overlay
+        await self._publish_overlay_for_ctx(
+            ctx,
+            "products",
+            {
+                "view": "detail",
+                "product": self._format_product_card(product),
+                "selectedFlavors": [
+                    _sanitize_output(self._format_flavor_card(f))
+                    for f in resolved_flavors
+                ],
+                "flavorSummary": _sanitize_output(flavor_summary),
+            },
         )
-        self._remember_product_context(product, line)
+
+        # Human-readable note for the LLM to speak out
+        flavor_names = ", ".join(f["name"] for f in resolved_flavors) or "no flavors"
+        agent_note = (
+            f"I have added {used} flavor(s): {flavor_names}. "
+            f"You have {remaining_free} free flavor(s) remaining. "
+            f"Extra flavor charge is {float(extra_charge):.2f} dirham."
+        )
+
         return _sanitize_output(
             {
-                "product_id": product_id,
-                "productName": product.get("name"),
-                "size": product.get("size"),
-                "note": note,
-                "summary": line["flavor_summary"],
+                "status": "Flavors updated",
+                "productId": product_id,
+                "flavors": [f["id"] for f in resolved_flavors],
+                "flavorSummary": flavor_summary,
+                "agentNote": agent_note,
             }
         )
 
-    @function_tool(
-        name="choose_toppings",
-        description=(
-            "Attach selected toppings (by topping_ids) to a specific product (product_id). "
-            "Automatically tracks free vs. charged toppings per SCOOP_KB."
-        ),
-    )
+    @function_tool(name="choose_toppings", description="Attach selected toppings.")
     async def choose_toppings(
         self,
-        product_id: Annotated[str, Field(description="ID of the treat currently being configured.")],
-        topping_ids: Annotated[List[str], Field(description="List of topping IDs to attach to the treat.")],
+        product_id: str,
+        topping_ids: List[str],
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         product = self._products.get(product_id)
         if not product:
-            product = self._resolve_product(product_id, None)
-            if product:
-                product_id = product.get("id", product_id)
-        if not product:
-            return {"error": f"Unknown product '{product_id}'"}
+            return {"error": "Unknown product"}
+
         line = self._get_or_create_line_state(product)
-        topping_summary = line.get("topping_summary", {})
-        free_total = int(topping_summary.get("free", 0))
-        free_used = int(topping_summary.get("used", 0))
-        free_remaining = max(free_total - free_used, 0)
-        selected: List[Dict[str, Any]] = []
-        resolved: List[Dict[str, Any]] = []
-        for raw in topping_ids:
-            topping = self._resolve_topping(raw)
-            if topping:
-                resolved.append(topping)
-        for topping in resolved:
-            is_free = free_remaining > 0
-            price = Decimal(str(topping.get("priceAED") or 0.0))
-            selected.append(
-                {
-                    "id": topping["id"],
-                    "name": topping["name"],
-                    "priceAED": float(price),
-                    "imageUrl": topping.get("imageUrl") or self._kb["image_defaults"]["square"],
-                    "isFree": is_free,
-                    "unitPriceAED": float(Decimal("0.00") if is_free else price),
-                }
-            )
-            if is_free:
-                free_remaining -= 1
-        chargeable = [t for t in selected if not t["isFree"]]
-        extra_charge = sum(Decimal(str(t.get("priceAED") or 0.0)) for t in chargeable)
-        line["toppings"] = selected
-        line["topping_summary"] = {
-            "free": free_total,
-            "used": free_total - free_remaining,
-            "extra": len(chargeable),
-            "charge": extra_charge,
-        }
-        detail_payload = self._build_product_detail_payload(product)
-        await self._publish_overlay_for_ctx(ctx, "products", detail_payload)
-        self._remember_product_context(product, line)
+
+        resolved_toppings: List[Dict[str, Any]] = []
+        for tid in topping_ids:
+            t = self._resolve_topping(tid)
+            if t:
+                resolved_toppings.append(t)
+
+        line["toppings"] = resolved_toppings
+
+        topping_summary = line.get("topping_summary", {}) or {}
+        free_slots = int(
+            topping_summary.get("free", int(product.get("includedToppings") or 0))
+        )
+        used = len(resolved_toppings)
+        extra_count = max(0, used - free_slots)
+
+        extra_charge = Decimal(0)
+        if extra_count > 0:
+            # charge only toppings beyond free slots
+            chargeable_toppings = resolved_toppings[free_slots:]
+            for t in chargeable_toppings:
+                price = Decimal(str(t.get("priceAED", 0.0)))
+                extra_charge += price
+
+        remaining_free = max(free_slots - used, 0)
+
+        topping_summary["free"] = free_slots
+        topping_summary["used"] = used
+        topping_summary["remainingFree"] = remaining_free
+        topping_summary["extraCount"] = extra_count
+        topping_summary["charge"] = extra_charge
+        line["topping_summary"] = topping_summary
+
+        await self._publish_overlay_for_ctx(
+            ctx,
+            "products",
+            {
+                "view": "detail",
+                "product": self._format_product_card(product),
+                "selectedToppings": [
+                    _sanitize_output(self._format_topping_card(t))
+                    for t in resolved_toppings
+                ],
+                "toppingSummary": _sanitize_output(topping_summary),
+            },
+        )
+
+        topping_names = ", ".join(t["name"] for t in resolved_toppings) or "no toppings"
+        agent_note = (
+            f"I have added {used} topping(s): {topping_names}. "
+            f"You have {remaining_free} free topping(s) remaining. "
+            f"Extra topping charge is {float(extra_charge):.2f} dirham."
+        )
+
         return _sanitize_output(
             {
-                "product_id": product_id,
-                "productName": product.get("name"),
-                "summary": line["topping_summary"],
+                "status": "Toppings updated",
+                "productId": product_id,
+                "toppings": [t["id"] for t in resolved_toppings],
+                "toppingSummary": topping_summary,
+                "agentNote": agent_note,
             }
         )
 
-    @function_tool(
-        name="add_to_cart",
-        description="Finalize the configured product line and push it into the cart overlay.",
-    )
+    @function_tool(name="add_to_cart", description="Finalize product and add to cart.")
     async def add_to_cart(
         self,
-        product_id: Annotated[str, Field(description="ID of the treat to add to the cart.")],
-        qty: Annotated[int, Field(description="Quantity to add. Minimum of 1.")] = 1,
+        product_id: str,
+        qty: int = 1,
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         product = self._products.get(product_id)
         if not product:
-            product = self._resolve_product(None, product_id)
-            if product:
-                product_id = product.get("id", product_id)
-        if not product:
-            return _sanitize_output({"error": f"Unknown product '{product_id}'", "cart": {"items": [], **self._cart_summary}})
+            return {"error": "Unknown product"}
 
         qty = max(1, int(qty))
-        line = self._get_or_create_line_state(product)
-        base_price = Decimal(str(product.get("priceAED") or "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        flavor_extra = Decimal(str(line.get("flavor_summary", {}).get("charge", Decimal("0.00")))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        topping_extra = Decimal(str(line.get("topping_summary", {}).get("charge", Decimal("0.00")))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        unit_total = (base_price + flavor_extra + topping_extra).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        line_total = (unit_total * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        flavor_extra_total = (flavor_extra * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        topping_extra_total = (topping_extra * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        base_total = (base_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        flavors_simple = []
-        for f in line.get("flavors", []):
-            if not f.get("id"):
-                continue
-            unit_price = Decimal(str(f.get("unitPriceAED") or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            flavor_total = (unit_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            flavors_simple.append(
-                {
-                    "id": f.get("id"),
-                    "name": f.get("name"),
-                    "imageUrl": f.get("imageUrl"),
-                    "isExtra": bool(f.get("isExtra")),
-                    "unitPriceAED": float(unit_price),
-                    "qty": qty,
-                    "linePriceAED": float(flavor_total),
-                }
-            )
-        toppings_simple = []
-        for t in line.get("toppings", []):
-            if not t.get("id"):
-                continue
-            unit_price = Decimal(str(t.get("unitPriceAED") or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            topping_total = (unit_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            toppings_simple.append(
-                {
-                    "id": t.get("id"),
-                    "name": t.get("name"),
-                    "priceAED": t.get("priceAED"),
-                    "imageUrl": t.get("imageUrl"),
-                    "unitPriceAED": float(unit_price),
-                    "qty": qty,
-                    "linePriceAED": float(topping_total),
-                }
-            )
-        display_name = self._canonical_display(product.get("display"))
-        cart_line = {
-            "lineId": secrets.token_hex(4),
+        line = self._get_or_create_line_state(product)
+        flavor_summary = line.get("flavor_summary", {}) or {}
+        topping_summary = line.get("topping_summary", {}) or {}
+
+        base_price = Decimal(str(product.get("priceAED") or 0.0))
+        flavor_charge = Decimal(str(flavor_summary.get("charge", 0)))
+        topping_charge = Decimal(str(topping_summary.get("charge", 0)))
+
+        per_unit_subtotal = base_price + flavor_charge + topping_charge
+        line_subtotal = per_unit_subtotal * Decimal(qty)
+        line_tax = (per_unit_subtotal * VAT_RATE) * Decimal(qty)
+        line_total = line_subtotal + line_tax
+
+        cart_item = {
             "product_id": product_id,
-            "name": product.get("name"),
+            "name": product["name"],
             "category": product.get("category"),
             "size": product.get("size"),
-            "imageUrl": product.get("imageUrl"),
+            "imageUrl": product.get("imageUrl")
+            or self._kb["image_defaults"]["square"],
             "qty": qty,
-            "flavors": flavors_simple,
-            "toppings": toppings_simple,
-            "basePriceAED": float(base_total),
-            "flavorExtrasAED": float(flavor_extra_total),
-            "toppingExtrasAED": float(topping_extra_total),
-            "lineTotalAED": float(line_total),
-            "display": display_name,
+            # price breakdown for UI
+            "basePriceAED": _sanitize_output(base_price),
+            "flavorExtrasAED": _sanitize_output(flavor_charge),
+            "toppingExtrasAED": _sanitize_output(topping_charge),
+            "unitSubTotalAED": _sanitize_output(per_unit_subtotal),
+            "unitTaxAED": _sanitize_output(per_unit_subtotal * VAT_RATE),
+            "lineSubTotalAED": _sanitize_output(line_subtotal),
+            "lineTaxAED": _sanitize_output(line_tax),
+            "lineTotalAED": _sanitize_output(line_total),
+            # line details
+            "flavors": [
+                {
+                    **self._format_flavor_card(f),
+                    "unitPriceAED": 0.0,
+                }
+                for f in line.get("flavors", [])
+            ],
+            "toppings": [
+                {
+                    **self._format_topping_card(t),
+                    "unitPriceAED": float(t.get("priceAED") or 0.0),
+                }
+                for t in line.get("toppings", [])
+            ],
         }
-        self._cart_items.append(cart_line)
-        self._line_state.pop(product_id, None)
-        summary = self._recompute_cart_summary()
-        cart_payload = {
-            "items": self._cart_items,
-            "subtotalAED": summary["subtotalAED"],
-            "taxAED": summary["taxAED"],
-            "totalAED": summary["totalAED"],
-        }
-        note = f"Cart now has {len(self._cart_items)} item(s) totaling {summary['totalAED']:.2f} dirham."
-        await self._publish_overlay_for_ctx(ctx, "cart", {"cart": cart_payload})
-        self._clear_product_context(product_id)
-        return _sanitize_output({"cart": cart_payload, "agentNote": note})
 
-    @function_tool(
-        name="get_directions",
-        description="Show pickup directions (Ice Cream Bar / Sundae Counter / Milkshake Bar) based on the order.",
-    )
+        self._cart_items.append(cart_item)
+        cart_subtotal = Decimal(0)
+        cart_tax = Decimal(0)
+        cart_total = Decimal(0)
+        for item in self._cart_items:
+            cart_subtotal += Decimal(str(item.get("lineSubTotalAED", 0.0)))
+            cart_tax += Decimal(str(item.get("lineTaxAED", 0.0)))
+            cart_total += Decimal(str(item.get("lineTotalAED", 0.0)))
+
+        self._cart_summary = {
+            "subTotalAED": _sanitize_output(cart_subtotal),
+            "taxAED": _sanitize_output(cart_tax),
+            "totalAED": _sanitize_output(cart_total),
+        }
+
+        payload = {"items": self._cart_items, **self._cart_summary}
+
+        # 1. Publish Overlay
+        await self._publish_overlay_for_ctx(ctx, "cart", {"cart": payload})
+
+        # 2. Emit Client RPC + capture UI response
+        ui_rpc = await self._rpc_with_context(
+            ctx,
+            "client.cartUpdated",
+            {"cart": payload},
+        )
+
+        agent_note = (
+            f"I have added {qty} {product['name']} to your cart. "
+            f"Your current total is {float(cart_total):.2f} dirham including tax."
+        )
+
+        return _sanitize_output(
+            {
+                "cart": payload,
+                "uiRpc": ui_rpc,
+                "agentNote": agent_note,
+            }
+        )
+
+    @function_tool(name="get_directions", description="Show pickup directions.")
     async def get_directions(
         self,
-        display_name: Annotated[
-            str,
-            Field(description="Primary pickup location to highlight (e.g., 'Sundae Counter')."),
-        ],
-        extra_displays: Annotated[
-            Optional[List[str]],
-            Field(description="Optional additional pickup locations to mention."),
-        ] = None,
+        display_name: str,
+        extra_displays: Optional[List[str]] = None,
         ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
-        displays = []
-        primary = (display_name or "").strip()
-        if primary:
-            displays.append(primary)
-        for extra in extra_displays or []:
-            if extra and extra not in displays:
-                displays.append(extra)
-        if not displays and primary:
-            displays.append(primary)
-        kb_displays = self._kb.get("displays", {})
+        displays = self._kb.get("displays", {})
+
         locations: List[Dict[str, Any]] = []
-        for name in displays:
-            record = kb_displays.get(name)
+
+        def build_location(name: str) -> Dict[str, Any]:
             canonical = self._canonical_display(name)
-            products_here = [
-                item.get("name")
-                for item in self._cart_items
-                if canonical and item.get("display") == canonical
-            ]
-            locations.append(
-                {
-                    "displayName": (record or {}).get("displayName") or canonical or name,
-                    "hint": (record or {}).get("hint"),
-                    "mapImage": (record or {}).get("mapImage"),
-                    "products": [p for p in products_here if p],
-                }
-            )
+            info = displays.get(canonical or name, {})
+            return {
+                "displayName": info.get("displayName", canonical or name),
+                "hint": info.get("hint", "Please proceed to this counter."),
+                "mapImage": info.get("mapImage"),
+            }
+
+        locations.append(build_location(display_name))
+
+        if extra_displays:
+            for extra in extra_displays:
+                locations.append(build_location(extra))
+
         payload = {"locations": locations}
+
+        # Overlay
         await self._publish_overlay_for_ctx(ctx, "directions", payload)
-        await self._emit_client_rpc(ctx, "client.directions", {"action": "show", "locations": locations})
-        primary_name = locations[0]["displayName"] if locations else display_name or "the counter"
-        payload["agentNote"] = f"Directions to {primary_name} are visible. Escort the guest verbally."
-        return _sanitize_output(payload)
+
+        # RPC for UI (DirectionsPayload expects action + locations) + store context
+        ui_rpc = await self._rpc_with_context(
+            ctx,
+            "client.directions",
+            {"action": "show", "locations": locations},
+        )
+
+        return _sanitize_output(
+            {
+                **payload,
+                "uiRpc": ui_rpc,
+            }
+        )
+
 
 class ScoopAgent(Agent):
-    """Agent wrapper that keeps persona instructions grounded in session context."""
+    """Agent wrapper from Code 1, adapted for Google/Deepgram/Cartesia pipeline."""
 
     def __init__(self, session_state: ScoopSessionState, tools: ScoopTools) -> None:
         self._session_state = session_state
@@ -1696,29 +2065,22 @@ class ScoopAgent(Agent):
         greeting = _time_of_day_greeting()
         instructions = SCOOP_PROMPT.replace("{{CATALOG_CONTEXT}}", catalog_context)
         instructions = instructions.replace("{{GREETING}}", greeting)
-        return (
-            f"{instructions}\n\n"
-            "# Session Context\n"
-            f"{context_summary}\n"
-        )
+        instructions = instructions.replace("{{SESSION_CONTEXT}}", context_summary)
+        return instructions
 
-    async def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
-        processed = process_structured_output(text)
-        return Agent.default.tts_node(self, processed, model_settings)
-
-    async def transcription_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
-        processed = process_structured_output(text)
-        return Agent.default.transcription_node(self, processed, model_settings)
-
-    async def on_enter(self) -> None:
+    async def on_enter(self, participant: Any = None) -> None:
+        logger.info("[AGENT] on_enter called, sending initial greeting.")
         try:
             await self.session.generate_reply()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Failed to deliver opening greeting")
 
+
 # =====================
-# Worker Entrypoint
+# Worker Entrypoint (Rewritten for Code 2 Pipeline)
 # =====================
+
+
 async def entrypoint(ctx: JobContext) -> None:
     config = CONFIG
     job_id = ctx.job.id if ctx.job else None
@@ -1727,24 +2089,34 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await ctx.connect()
 
-    llm = openai.realtime.RealtimeModel(
-        api_key=config.openai_api_key,
-        model=config.openai_realtime_model,
-        temperature=0.8,
-        modalities=["text", "audio"],
-        voice=config.openai_realtime_voice,
-        turn_detection=TurnDetection(
-            type="server_vad",
-            threshold=0.5,
-            prefix_padding_ms=300,
-            silence_duration_ms=300,
-            create_response=True,
-            interrupt_response=True,
-        ),
+    logger.info(
+        "[ENTRYPOINT] Starting job_id=%s | agent_identity=%s | controller_identity=%s",
+        job_id,
+        agent_identity,
+        controller_identity,
     )
 
-    session = AgentSession(llm=llm, resume_false_interruption=False)
+    # --- PIPELINE SETUP (Code 2 Style) ---
+    stt = deepgram.STT(model="nova-3", api_key=config.deepgram_api_key)
+    vad = silero.VAD.load()
+    llm = google.LLM(
+        model=config.google_model,
+        api_key=config.google_api_key,
+    )
+    tts = cartesia.TTS(
+        model="sonic-3",
+        voice=config.cartesia_voice_id,
+        api_key=config.cartesia_api_key,
+    )
 
+    session = AgentSession(
+        stt=stt,
+        vad=vad,
+        llm=llm,
+        tts=tts,
+    )
+
+    # Avatar Session
     avatar_session = anam_avatar.AvatarSession(
         persona_config=anam_avatar.PersonaConfig(
             name=config.agent_name,
@@ -1755,9 +2127,11 @@ async def entrypoint(ctx: JobContext) -> None:
         avatar_participant_identity=agent_identity,
     )
 
+    # State & Tools (Code 1 Style)
     session_state = ScoopSessionState()
     tools = ScoopTools(config, session, ctx.room, controller_identity, session_state)
 
+    # --- RPC Handlers ---
     async def handle_add_to_cart_rpc(rpc_data) -> str:
         try:
             payload_raw = rpc_data.payload or "{}"
@@ -1766,36 +2140,46 @@ async def entrypoint(ctx: JobContext) -> None:
             qty = int(payload.get("qty", 1))
             if not product_id:
                 return "missing productId"
+
             await tools.add_to_cart(str(product_id), qty, None)
             return "ok"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("agent.addToCart RPC error: %s", exc)
             return f"error: {exc}"
 
-    ctx.room.local_participant.register_rpc_method("agent.addToCart", handle_add_to_cart_rpc)
+    ctx.room.local_participant.register_rpc_method(
+        "agent.addToCart", handle_add_to_cart_rpc
+    )
 
     async def handle_overlay_ack_rpc(rpc_data) -> str:
-        try:
-            payload_raw = rpc_data.payload or "{}"
-            payload = json.loads(payload_raw)
-            return await tools.handle_overlay_ack(payload)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("agent.overlayAck RPC error: %s", exc)
-            return f"error: {exc}"
+        # Minimal Ack logic for overlays
+        return "ok"
 
-    ctx.room.local_participant.register_rpc_method("agent.overlayAck", handle_overlay_ack_rpc)
+    ctx.room.local_participant.register_rpc_method(
+        "agent.overlayAck", handle_overlay_ack_rpc
+    )
 
+    # --- Start ---
     wait_for_guest = asyncio.create_task(ctx.wait_for_participant())
     avatar_ready = asyncio.create_task(avatar_session.start(session, room=ctx.room))
     await asyncio.gather(wait_for_guest, avatar_ready)
+
+    logger.info(
+        "[ENTRYPOINT] Guest connected and avatar ready, starting agent session."
+    )
 
     agent = ScoopAgent(session_state, tools)
 
     await session.start(
         agent=agent,
         room=ctx.room,
-        room_input_options=RoomInputOptions(video_enabled=False, audio_enabled=True),
+        # CHANGED: use room_options instead of room_input_options
+        room_options=RoomInputOptions(
+            video_enabled=False,
+            audio_enabled=True,
+        ),
     )
+
 
 # ===============
 # Request Handler
@@ -1806,6 +2190,12 @@ async def request_fnc(req: JobRequest) -> None:
     controller_identity = config.controller_identity(req.id)
     metadata = config.agent_metadata(agent_identity)
     attributes = {**metadata, "agentControllerIdentity": controller_identity}
+    logger.info(
+        "[REQUEST] Accepting job | job_id=%s | agent_identity=%s | controller_identity=%s",
+        req.id,
+        agent_identity,
+        controller_identity,
+    )
     await req.accept(
         name=config.agent_name,
         identity=controller_identity,
@@ -1813,9 +2203,7 @@ async def request_fnc(req: JobRequest) -> None:
         attributes=attributes,
     )
 
-# =====================
-# __main__
-# =====================
+
 if __name__ == "__main__":
     config = CONFIG
     cli.run_app(
@@ -1826,6 +2214,3 @@ if __name__ == "__main__":
             agent_name=config.agent_name,
         )
     )
-
-
-
