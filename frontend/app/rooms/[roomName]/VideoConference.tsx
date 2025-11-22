@@ -78,11 +78,11 @@ export function VideoConference({
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-[color:var(--icecream-dark)]">
-            <div className="rounded-2xl bg-white/70 px-8 py-6 text-center shadow-xl backdrop-blur">
-              <p className="text-lg font-semibold">
+            <div className="rounded-[32px] border border-black/5 bg-white px-10 py-8 text-center shadow-2xl">
+              <p className="text-xl font-bold text-[color:var(--icecream-dark)]">
                 Waiting for Scoop to join the room…
               </p>
-              <p className="text-sm opacity-70 mt-2">
+              <p className="text-sm font-medium text-black/60 mt-2">
                 This usually takes a few seconds.
               </p>
             </div>

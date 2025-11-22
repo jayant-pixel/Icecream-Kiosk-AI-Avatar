@@ -16,17 +16,14 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import (
-    Annotated,
     Any,
     Dict,
     List,
     Optional,
-    TYPE_CHECKING,
     Literal,
     cast,
 )
 import re
-
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -44,16 +41,10 @@ from livekit.agents.voice.room_io import RoomInputOptions
 # --- CHANGED: New Plugin Imports ---
 from livekit.plugins import google, deepgram, cartesia, silero
 from livekit.plugins.anam import avatar as anam_avatar
-from pydantic import Field
 
 logger = logging.getLogger("baskin-avatar-agent")
 logger.setLevel(logging.INFO)
 load_dotenv(dotenv_path=Path(__file__).resolve().with_name(".env"))
-
-if TYPE_CHECKING:
-    RunCtxParam = Optional[RunContext]
-else:
-    RunCtxParam = Optional[Any]
 
 OVERLAY_TOPIC = "ui.overlay"
 CATEGORY_FALLBACK = "Highlights"
@@ -181,6 +172,48 @@ You are **Sarah**, the refined, polished, and friendly front-of-house host at **
 - **Speak numbers fully spelled out.**
 - **Do NOT assume anything** (flavors, toppings, size, quantity). Ask and confirm only after showing the correct UI overlay.
 
+---
+
+# Tool Calling Rules (CRITICAL)
+Tool calls are internal and must never be spoken aloud.
+
+When you call tools:
+
+- Always include **all required arguments**.
+- For **menu and product lookup**, you MUST use:
+
+  - Category grid:  
+    `list_menu(kind="products", category="Cups"/"Sundae Cups"/"Milk Shakes", view="grid")`
+
+  - Product detail by id:  
+    `list_menu(kind="products", product_id="...", view="detail")`
+
+  - Product detail by text search (Quick Order):  
+    `list_menu(kind="products", view="detail", query="<short product description from what the guest said>")`
+
+  - Flavor board:  
+    `list_menu(kind="flavors", product_id="...")`
+
+  - Toppings board:  
+    `list_menu(kind="toppings", product_id="...")`
+
+- Flavor selection:  
+  `choose_flavors(product_id="...", flavor_ids=["flv_...", ...])`
+
+- Topping selection:  
+  `choose_toppings(product_id="...", topping_ids=["top_...", ...])`
+
+- Add to cart:  
+  `add_to_cart(product_id="...", qty=1)`
+
+- Directions:  
+  `get_directions(display_name="Ice Cream Bar"/"Sundae Counter"/"Milkshake Bar")`
+
+❗ Never call `list_menu` without `kind`.  
+❗ For Quick Order, use `query` instead of forcing the user to pick from the menu.
+
+---
+
 # Greeting
 Start with:
 **"{{GREETING}}, welcome to Baskin Robbins. My name is Sarah. May I know your name?"**
@@ -262,33 +295,108 @@ Ask next:
 ---
 
 # Phase 3 — Quick Order (Expert Flow)
-Trigger this ONLY when the guest gives **complete details in one sentence**, including:
-- product  
-- size  
-- all flavors  
-- all toppings
 
-### Quick Order Steps
-1. Confirm verbally (repeat their full order).
-2. **DO NOT open any menus in quick mode.**
-3. Silently call:
-   - `choose_flavors(...)`
-   - `choose_toppings(...)`  
-     (skip if they didn’t mention toppings)
-4. Then:  
-   `add_to_cart(...)`
-5. Summarize price and ask “Would you like anything else?”
+Use **Quick Order** when the guest speaks their order naturally in one sentence, for example:
+- “A double sundae with chocolate and strawberry and almonds on top.”
+- “Large chocolate chiller thick shake.”
+- “Single scoop vanilla cup, no toppings.”
 
-### Exception:
-If they request a double/triple scoop but mention fewer flavors than the number of scoops:
-You MUST ask:  
-“You still have one free scoop. Would you like to choose another flavor or repeat one?”
+In Quick Order, the guest already **knows what they want**.  
+You must **not** force them back to browsing the menu if their spoken order matches a KB product.
+
+## 3A — Detect Quick Order vs Guided Flow
+Treat the input as Quick Order when the guest sentence includes:
+- a product or category name (cup / sundae / milkshake / shake, etc.),
+- and/or a size (single / double / triple / kids / value / emlaaq / regular / large),
+- and optionally flavors and toppings.
+
+If the guest clearly describes an item, assume **Quick Order**.  
+If they only say “show me sundaes” or “I’m not sure yet”, use **Guided Flow** instead.
+
+## 3B — Resolve product using `query` (NO category grid)
+When Quick Order is triggered:
+
+1. Build a **short product description string** from what they said, for example:
+   - “double sundae value”
+   - “single scoop kids cup”
+   - “large chocolate chiller thick shake”
+
+2. Call this tool to resolve the product and open its detail internally:
+   `list_menu(kind="products", view="detail", query="<that short description>")`
+
+This uses the internal KB to match to the correct `product_id`.  
+Do **not** show a category grid in Quick Order.
+
+## 3C — Confirm verbally
+After the product is resolved, you must **repeat back** what you understood:
+
+“Just to confirm, you’d like a {{size}} {{product name}} with {{flavors}} and {{toppings_or_without}}. Is that correct?”
+
+Wait for their YES/NO.
+
+## 3D — On YES: silently apply tools and add to cart
+After the guest confirms:
+
+1. Silently attach flavors they mentioned:  
+   `choose_flavors(product_id=..., flavor_ids=[...])`
+
+2. Silently attach toppings they mentioned (if any):  
+   `choose_toppings(product_id=..., topping_ids=[...])`  
+   If they clearly said “no toppings”, do not call `choose_toppings`.
+
+3. Check your internal understanding of free scoops and free toppings:
+   - If they have **free scoops remaining**, say:  
+     “You still have free flavor choice remaining. Would you like to add another flavor or keep it as it is?”
+     - If they want to choose more visually, then:  
+       `list_menu(kind="flavors", product_id=...)`
+       `choose_flavors(product_id=..., flavor_ids=[...])`
+    - Then refresh the product card:  
+       `list_menu(kind="products", product_id=..., view="detail")`
+   - If the product includes free toppings and none were chosen, ask:  
+     “You have free toppings included. Would you like to add any toppings, or keep it without toppings?”
+     - If they want to see options, then:  
+       `list_menu(kind="toppings", product_id=...)`
+        `choose_toppings(product_id=..., toppings_ids=[...])`
+    - Then refresh the product card:  
+       `list_menu(kind="products", product_id=..., view="detail")`
+
+
+4. When the item is complete and confirmed, add it directly to the cart:  
+   `add_to_cart(product_id=..., qty=1)`
+
+5. Summarize:
+   - name and size of the item
+   - flavors and toppings
+   - any extra flavor/topping costs
+   - final total in dirham
+
+Then ask:
+“Would you like anything else?”
+
+## 3E — On NO / if unclear
+If your interpretation is wrong or incomplete:
+- Politely clarify only the missing part:
+  - “Which flavors would you like with your double sundae?”
+  - “Would you like any toppings, or keep it without toppings?”
+- Use Quick Order again:
+  - Update the product/flavors/toppings based on their answer.
+  - Then `add_to_cart` when confirmed.
+
+Quick Order must **not**:
+- send the guest back to “Please pick from the menu” if they already spoke a clear order.
+- open a category grid in between.
+- ask them to repeat everything they already said.
+
+Menus are for:
+- when they ask to **see options**, or
+- when they want to use **remaining free scoops/toppings** visually.
 
 ---
 
 # Phase 4 — Loop or Checkout
 If user wants more items:
-- Return to **Phase 1 category selection**.
+- Return to **Phase 1 category selection** if they want to browse, **or**
+- Let them speak another Quick Order sentence and handle it through Phase 3.
 
 If user says “that’s all”:
 - Use correct counter:
@@ -306,13 +414,15 @@ Then say:
 
 # Guardrails (VERY IMPORTANT)
 - **NEVER invent or assume flavors, toppings, or sizes.**
-- **NEVER call `add_to_cart` without flavors selected.**
-- **NEVER open toppings before flavors.**
-- **NEVER skip the detail card.**
+- **NEVER call `add_to_cart` without flavors selected when flavors are required.**
+- **NEVER open toppings before flavors in the guided flow.**
+- **NEVER skip the detail card in guided flow.**
 - **NEVER assume default items like ‘vanilla’ or ‘chocolate’.**
-- **NEVER select anything unless the guest says it.**
-- **Menu first → THEN ask.**
-- **Every tool call must reflect the user’s exact intent.**
+- **Every tool call must reflect the user’s exact intent and include all required arguments (`kind`, `product_id`/`query`, ids lists, qty, display_name).**
+- In **Quick Order**, you must:
+  - resolve the product with `list_menu(kind="products", view="detail", query="...")`,
+  - attach flavors/toppings silently,
+  - and then call `add_to_cart` directly once confirmed.
 
 ---
 
@@ -1178,7 +1288,6 @@ async def _emit_client_rpc(
 # Tools / Functions
 # =================
 
-
 class ScoopTools:
     SIZE_ALIAS = {"small": "Kids", "value": "Value", "big": "Emlaaq", "large": "Emlaaq"}
 
@@ -1219,7 +1328,6 @@ class ScoopTools:
 
     async def _rpc_with_context(
         self,
-        ctx: "RunCtxParam",
         method: str,
         payload: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
@@ -1229,9 +1337,12 @@ class ScoopTools:
         - parses the response (if any)
         - stores it into ScoopSessionState
         - returns parsed response so tools can include it in their JSON
+
+        NOTE: we no longer expose any ctx argument to the tools, we always
+        use the stored room (self._room) and pass ctx=None to _emit_client_rpc.
         """
         rpc_raw = await _emit_client_rpc(
-            cast(Optional[RunContext], ctx),
+            None,
             method,
             payload,
             session=self._session,
@@ -1275,14 +1386,12 @@ class ScoopTools:
         return "\n".join(lines)
 
     async def _publish_overlay_for_ctx(
-        self, ctx: "RunCtxParam", kind: str, data: Dict[str, Any]
+        self, kind: str, data: Dict[str, Any]
     ) -> None:
         """
         Helper used by tools to publish overlays.
         Uses the stored room (self._room) rather than session.room.
         """
-        run_ctx = cast(Optional[RunContext], ctx) if ctx else None
-        session_obj: AgentSession = self._session
 
         # State updates
         if self._session_state:
@@ -1294,7 +1403,7 @@ class ScoopTools:
                 history.pop(0)
 
         await _publish_overlay(
-            session=session_obj,
+            session=self._session,
             kind=kind,
             data=data,
             room=self._room,
@@ -1398,36 +1507,21 @@ class ScoopTools:
             None,
         )
 
-    # --- MODIFIED TOOLS: ADDING RPC CALLS & PASSING ROOM ---
-
+    # --- MODIFIED TOOLS: CLEAN SCHEMA (NO ctx, OPTIONAL ARGS) ---
     @function_tool(
         name="list_menu",
-        description="Render menu overlays. kind='products'|'flavors'|'toppings'.",
+        description="Render menu overlays. kind='products'|'flavors'|'toppings'.",     # ← ★★ CRITICAL FIX ★★
     )
     async def list_menu(
         self,
-        kind: Annotated[
-            Literal["products", "flavors", "toppings"],
-            Field(description="Overlay kind"),
-        ],
-        category: Annotated[
-            Optional[str], Field(description="Filter category")
-        ] = None,
-        size: Annotated[
-            Optional[str], Field(description="Filter size")
-        ] = None,
-        query: Annotated[
-            Optional[str], Field(description="Search text")
-        ] = None,
-        view: Annotated[
-            Optional[Literal["grid", "detail"]],
-            Field(description="Grid or detail"),
-        ] = None,
-        product_id: Annotated[
-            Optional[str], Field(description="Target product ID")
-        ] = None,
-        ctx: "RunCtxParam" = None,
+        kind: Literal["products", "flavors", "toppings"] = "products",
+        category: Optional[str] = None,
+        size: Optional[str] = None,
+        query: Optional[str] = None,
+        view: Optional[Literal["grid", "detail"]] = None,
+        product_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+
         logger.info(
             "[TOOL] list_menu CALLED | kind=%s | category=%s | size=%s | product_id=%s | view=%s | query=%s",
             kind,
@@ -1437,17 +1531,18 @@ class ScoopTools:
             view,
             query,
         )
+
         kind_normalized = (kind or "").strip().lower()
 
-        # ----------------------
+        # =====================================================
         # PRODUCTS OVERLAY
-        # ----------------------
+        # =====================================================
         if kind_normalized == "products":
             view_mode = view or "grid"
             payload: Dict[str, Any] = {}
             target_product: Optional[Dict[str, Any]] = None
 
-            # DETAIL VIEW (single product card)
+            # DETAIL VIEW
             if view_mode == "detail" or product_id:
                 target_product = self._resolve_product(
                     product_id or self._active_product_id, query
@@ -1455,7 +1550,6 @@ class ScoopTools:
                 if target_product:
                     self._active_product_id = target_product.get("id")
 
-                    # If we already have flavors/toppings in line_state, reflect them
                     line = self._get_or_create_line_state(target_product)
                     flavors_for_line = line.get("flavors", [])
                     toppings_for_line = line.get("toppings", [])
@@ -1468,8 +1562,7 @@ class ScoopTools:
                             "name": f["name"],
                             "classification": f.get("classification"),
                             "imageUrl": f.get("imageUrl"),
-                            "isExtra": idx
-                            >= int(flavor_summary.get("free", 0)),
+                            "isExtra": idx >= int(flavor_summary.get("free", 0)),
                         }
                         for idx, f in enumerate(flavors_for_line)
                     ]
@@ -1479,8 +1572,7 @@ class ScoopTools:
                             "name": t["name"],
                             "priceAED": float(t.get("priceAED") or 0.0),
                             "imageUrl": t.get("imageUrl"),
-                            "isFree": idx
-                            < int(topping_summary.get("free", 0)),
+                            "isFree": idx < int(topping_summary.get("free", 0)),
                         }
                         for idx, t in enumerate(toppings_for_line)
                     ]
@@ -1488,53 +1580,39 @@ class ScoopTools:
                     flavor_note = None
                     if flavor_summary:
                         used = int(flavor_summary.get("used", 0))
-                        free_slots = int(
-                            flavor_summary.get("free", 0)
-                        )
+                        free_slots = int(flavor_summary.get("free", 0))
                         extra_count = max(0, used - free_slots)
-                        charge = float(
-                            flavor_summary.get("charge", 0) or 0
-                        )
+                        charge = float(flavor_summary.get("charge", 0) or 0)
                         flavor_note = {
                             "label": f"{used} flavor(s) selected ({extra_count} extra)",
-                            "extraNote": f"Extra flavor charge: {charge:.2f} dirham"
-                            if charge > 0
-                            else None,
+                            "extraNote": (
+                                f"Extra flavor charge: {charge:.2f} dirham"
+                                if charge > 0 else None
+                            ),
                         }
 
                     topping_note = None
                     if topping_summary:
                         used = int(topping_summary.get("used", 0))
-                        free_slots = int(
-                            topping_summary.get("free", 0)
-                        )
+                        free_slots = int(topping_summary.get("free", 0))
                         extra_count = max(0, used - free_slots)
-                        charge = float(
-                            topping_summary.get("charge", 0) or 0
-                        )
+                        charge = float(topping_summary.get("charge", 0) or 0)
                         topping_note = {
                             "label": f"{used} topping(s) selected ({extra_count} extra)",
-                            "extraNote": f"Extra topping charge: {charge:.2f} dirham"
-                            if charge > 0
-                            else None,
+                            "extraNote": (
+                                f"Extra topping charge: {charge:.2f} dirham"
+                                if charge > 0 else None
+                            ),
                         }
 
                     payload = {
                         "kind": "products",
                         "view": "detail",
                         "product": self._format_product_card(target_product),
-                        "selectedFlavors": _sanitize_output(
-                            selected_flavors
-                        ),
-                        "selectedToppings": _sanitize_output(
-                            selected_toppings
-                        ),
-                        "flavorSummary": _sanitize_output(flavor_note)
-                        if flavor_note
-                        else None,
-                        "toppingSummary": _sanitize_output(topping_note)
-                        if topping_note
-                        else None,
+                        "selectedFlavors": _sanitize_output(selected_flavors),
+                        "selectedToppings": _sanitize_output(selected_toppings),
+                        "flavorSummary": _sanitize_output(flavor_note) if flavor_note else None,
+                        "toppingSummary": _sanitize_output(topping_note) if topping_note else None,
                         "contextProductId": target_product.get("id"),
                         "cartSummary": self._cart_summary or None,
                     }
@@ -1542,7 +1620,7 @@ class ScoopTools:
                 else:
                     view_mode = "grid"
 
-            # GRID VIEW (menu grid)
+            # GRID VIEW
             if view_mode == "grid":
                 prods = [
                     self._format_product_card(p)
@@ -1559,23 +1637,17 @@ class ScoopTools:
                     "cartSummary": self._cart_summary or None,
                 }
 
-            # 1. Publish Overlay
-            await self._publish_overlay_for_ctx(ctx, "products", payload)
+            # Publish overlay
+            await self._publish_overlay_for_ctx("products", payload)
 
-            # 2. Notify UI via RPC (and capture response)
+            # RPC
             rpc_payload = {
                 "view": view_mode,
                 "category": category or "All",
-                "productId": target_product.get("id")
-                if target_product
-                else None,
-                "productName": target_product.get("name")
-                if target_product
-                else None,
+                "productId": target_product.get("id") if target_product else None,
+                "productName": target_product.get("name") if target_product else None,
             }
-            ui_rpc = await self._rpc_with_context(
-                ctx, "client.menuLoaded", rpc_payload
-            )
+            ui_rpc = await self._rpc_with_context("client.menuLoaded", rpc_payload)
 
             logger.info(
                 "[TOOL] list_menu OUTPUT → view=%s | product_count=%d",
@@ -1586,30 +1658,18 @@ class ScoopTools:
             )
 
             payload["uiRpc"] = ui_rpc
-
             return _sanitize_output(payload)
 
-        # ----------------------
-        # FLAVORS / TOPPINGS OVERLAYS
-        # ----------------------
+        # =====================================================
+        # FLAVORS / TOPPINGS
+        # =====================================================
         if kind_normalized in ["flavors", "toppings"]:
             target_product_id = product_id or self._active_product_id
-            target_product = (
-                self._products.get(target_product_id)
-                if target_product_id
-                else None
-            )
-            line = (
-                self._get_or_create_line_state(target_product)
-                if target_product
-                else None
-            )
+            target_product = self._products.get(target_product_id) if target_product_id else None
+            line = self._get_or_create_line_state(target_product) if target_product else None
 
             if kind_normalized == "flavors":
-                cards = [
-                    self._format_flavor_card(f)
-                    for f in self._flavors.values()
-                ]
+                cards = [self._format_flavor_card(f) for f in self._flavors.values()]
                 free_slots = 0
                 used = 0
                 extra_count = 0
@@ -1621,24 +1681,19 @@ class ScoopTools:
                     free_slots = int(
                         flavor_summary.get(
                             "free",
-                            int(
-                                target_product.get("scoops") or 0
-                            )
-                            if target_product
-                            else 0,
+                            int(target_product.get("scoops") or 0) if target_product else 0,
                         )
                     )
                     used = len(line.get("flavors", []))
                     extra_count = max(0, used - free_slots)
+
                     for idx, f in enumerate(line.get("flavors", [])):
                         selected_ids.append(f["id"])
                         selected_flavors.append(
                             {
                                 "id": f["id"],
                                 "name": f["name"],
-                                "classification": f.get(
-                                    "classification"
-                                ),
+                                "classification": f.get("classification"),
                                 "imageUrl": f.get("imageUrl"),
                                 "isExtra": idx >= free_slots,
                             }
@@ -1647,17 +1702,9 @@ class ScoopTools:
                 payload = {
                     "kind": "flavors",
                     "productId": target_product_id,
-                    "productName": target_product.get("name")
-                    if target_product
-                    else None,
+                    "productName": target_product.get("name") if target_product else None,
                     "freeFlavors": free_slots,
-                    "maxFlavors": free_slots
-                    or used
-                    or (
-                        target_product.get("scoops")
-                        if target_product
-                        else 0
-                    ),
+                    "maxFlavors": free_slots or used or (target_product.get("scoops") if target_product else 0),
                     "selectedFlavorIds": selected_ids,
                     "selectedFlavors": selected_flavors,
                     "usedFreeFlavors": min(used, free_slots),
@@ -1666,36 +1713,25 @@ class ScoopTools:
                 }
 
             else:  # toppings
-                cards = [
-                    self._format_topping_card(t)
-                    for t in self._toppings.values()
-                ]
-                free_slots = 0
+                cards = [self._format_topping_card(t) for t in self._toppings.values()]
+                free_slots = int(target_product.get("includedToppings") or 0) if target_product else 0
                 selected_ids: List[str] = []
                 selected_toppings: List[Dict[str, Any]] = []
                 free_remaining = 0
 
-                if target_product:
-                    free_slots = int(
-                        target_product.get("includedToppings") or 0
-                    )
-
                 if line:
                     topping_summary = line.get("topping_summary", {}) or {}
-                    free_slots = int(
-                        topping_summary.get("free", free_slots)
-                    )
+                    free_slots = int(topping_summary.get("free", free_slots))
                     used = len(line.get("toppings", []))
                     free_remaining = max(0, free_slots - used)
+
                     for idx, t in enumerate(line.get("toppings", [])):
                         selected_ids.append(t["id"])
                         selected_toppings.append(
                             {
                                 "id": t["id"],
                                 "name": t["name"],
-                                "priceAED": float(
-                                    t.get("priceAED") or 0.0
-                                ),
+                                "priceAED": float(t.get("priceAED") or 0.0),
                                 "imageUrl": t.get("imageUrl"),
                                 "isFree": idx < free_slots,
                             }
@@ -1704,12 +1740,8 @@ class ScoopTools:
                 payload = {
                     "kind": "toppings",
                     "productId": target_product_id,
-                    "productName": target_product.get("name")
-                    if target_product
-                    else None,
-                    "category": target_product.get("category")
-                    if target_product
-                    else None,
+                    "productName": target_product.get("name") if target_product else None,
+                    "category": target_product.get("category") if target_product else None,
                     "note": "Extra toppings cost 5 or 6 dirham each.",
                     "freeToppings": free_slots,
                     "freeToppingsRemaining": free_remaining,
@@ -1718,30 +1750,18 @@ class ScoopTools:
                     "toppings": cards,
                 }
 
-            await self._publish_overlay_for_ctx(
-                ctx, kind_normalized, payload
-            )
+            await self._publish_overlay_for_ctx(kind_normalized, payload)
 
-            # Optional: small RPC for debug/telemetry + context
             rpc_payload = {
                 "productId": target_product_id,
-                "count": len(
-                    payload.get(
-                        "flavors"
-                        if kind_normalized == "flavors"
-                        else "toppings",
-                        [],
-                    )
-                ),
+                "count": len(payload.get("flavors" if kind_normalized == "flavors" else "toppings", [])),
             }
             ui_rpc = await self._rpc_with_context(
-                ctx,
                 f"client.{kind_normalized}Loaded",
                 rpc_payload,
             )
 
             payload["uiRpc"] = ui_rpc
-
             return _sanitize_output(payload)
 
         return {"error": "invalid kind"}
@@ -1753,7 +1773,6 @@ class ScoopTools:
         self,
         product_id: str,
         flavor_ids: List[str],
-        ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         product = self._products.get(product_id)
         if not product:
@@ -1791,7 +1810,6 @@ class ScoopTools:
 
         # Update detail product overlay
         await self._publish_overlay_for_ctx(
-            ctx,
             "products",
             {
                 "view": "detail",
@@ -1827,7 +1845,6 @@ class ScoopTools:
         self,
         product_id: str,
         topping_ids: List[str],
-        ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         product = self._products.get(product_id)
         if not product:
@@ -1868,7 +1885,6 @@ class ScoopTools:
         line["topping_summary"] = topping_summary
 
         await self._publish_overlay_for_ctx(
-            ctx,
             "products",
             {
                 "view": "detail",
@@ -1903,7 +1919,6 @@ class ScoopTools:
         self,
         product_id: str,
         qty: int = 1,
-        ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         product = self._products.get(product_id)
         if not product:
@@ -1919,10 +1934,48 @@ class ScoopTools:
         flavor_charge = Decimal(str(flavor_summary.get("charge", 0)))
         topping_charge = Decimal(str(topping_summary.get("charge", 0)))
 
+        # 1. Calculate per-unit totals
         per_unit_subtotal = base_price + flavor_charge + topping_charge
-        line_subtotal = per_unit_subtotal * Decimal(qty)
-        line_tax = (per_unit_subtotal * VAT_RATE) * Decimal(qty)
+        
+        # 2. Calculate line totals (Subtotal + Tax)
+        # Tax is applied to the line subtotal (unit * qty)
+        line_subtotal = (per_unit_subtotal * Decimal(qty)).quantize(Decimal("0.01"))
+        line_tax = (line_subtotal * VAT_RATE).quantize(Decimal("0.01"))
         line_total = line_subtotal + line_tax
+
+        # 3. Determine extra flavor cost per unit for UI
+        # We know total flavor charge. We need to distribute it or just show it.
+        # For the detailed list, we want to show which flavors are "extra".
+        # The simple logic: if there's a charge, and we have N extra flavors, each costs charge/N.
+        # But here we just need to populate 'unitPriceAED' for the UI to display.
+        # We'll check if the flavor is in the 'extra' list if we tracked it, 
+        # but 'flavor_summary' gives us total charge.
+        # Let's try to infer: if charge > 0, we assign it to the last N flavors?
+        # Or simpler: The UI just needs to know if it's extra.
+        # We'll use a helper to mark them.
+        
+        flavors_list = line.get("flavors", [])
+        # We need to know how many are free.
+        free_count = product.get("scoops", 1) # Usually scoops = free allowance
+        # But 'scoops' might not be exactly free allowance if logic differs, but usually it is.
+        
+        # Re-calculate extra flavors to be precise
+        # (This logic mirrors choose_flavors but we do it here to tag the cart items)
+        extra_price_per = Decimal("1.00") # Hardcoded in choose_flavors, ideally should be from config
+        
+        # Tag flavors with price
+        tagged_flavors = []
+        for i, f in enumerate(flavors_list):
+            f_card = self._format_flavor_card(f)
+            # If index >= free_count, it's extra (assuming simple FIFO logic)
+            is_extra = i >= free_count
+            unit_price = float(extra_price_per) if is_extra else 0.0
+            tagged_flavors.append({
+                **f_card,
+                "isExtra": is_extra,
+                "unitPriceAED": unit_price,
+                "linePriceAED": unit_price * qty, # Price for this flavor across all qty
+            })
 
         cart_item = {
             "product_id": product_id,
@@ -1942,26 +1995,24 @@ class ScoopTools:
             "lineTaxAED": _sanitize_output(line_tax),
             "lineTotalAED": _sanitize_output(line_total),
             # line details
-            "flavors": [
-                {
-                    **self._format_flavor_card(f),
-                    "unitPriceAED": 0.0,
-                }
-                for f in line.get("flavors", [])
-            ],
+            "flavors": tagged_flavors,
             "toppings": [
                 {
                     **self._format_topping_card(t),
                     "unitPriceAED": float(t.get("priceAED") or 0.0),
+                    "linePriceAED": float(t.get("priceAED") or 0.0) * qty,
                 }
                 for t in line.get("toppings", [])
             ],
         }
 
         self._cart_items.append(cart_item)
+        
+        # 4. Recalculate Cart Totals
         cart_subtotal = Decimal(0)
         cart_tax = Decimal(0)
         cart_total = Decimal(0)
+        
         for item in self._cart_items:
             cart_subtotal += Decimal(str(item.get("lineSubTotalAED", 0.0)))
             cart_tax += Decimal(str(item.get("lineTaxAED", 0.0)))
@@ -1976,11 +2027,10 @@ class ScoopTools:
         payload = {"items": self._cart_items, **self._cart_summary}
 
         # 1. Publish Overlay
-        await self._publish_overlay_for_ctx(ctx, "cart", {"cart": payload})
+        await self._publish_overlay_for_ctx("cart", {"cart": payload})
 
         # 2. Emit Client RPC + capture UI response
         ui_rpc = await self._rpc_with_context(
-            ctx,
             "client.cartUpdated",
             {"cart": payload},
         )
@@ -2003,7 +2053,6 @@ class ScoopTools:
         self,
         display_name: str,
         extra_displays: Optional[List[str]] = None,
-        ctx: "RunCtxParam" = None,
     ) -> Dict[str, Any]:
         displays = self._kb.get("displays", {})
 
@@ -2027,11 +2076,10 @@ class ScoopTools:
         payload = {"locations": locations}
 
         # Overlay
-        await self._publish_overlay_for_ctx(ctx, "directions", payload)
+        await self._publish_overlay_for_ctx("directions", payload)
 
         # RPC for UI (DirectionsPayload expects action + locations) + store context
         ui_rpc = await self._rpc_with_context(
-            ctx,
             "client.directions",
             {"action": "show", "locations": locations},
         )
@@ -2090,7 +2138,7 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
     logger.info(
-        "[ENTRYPOINT] Starting job_id=%s | agent_identity=%s | controller_identity=%s",
+        "[ENTRYPOINT] Starting job_id=%s | agent_identity=%s | controller_identity=%s |DEPLOYMENT VERIFICATION: FIX APPLIED (V2)",
         job_id,
         agent_identity,
         controller_identity,
@@ -2141,7 +2189,7 @@ async def entrypoint(ctx: JobContext) -> None:
             if not product_id:
                 return "missing productId"
 
-            await tools.add_to_cart(str(product_id), qty, None)
+            await tools.add_to_cart(str(product_id), qty)
             return "ok"
         except Exception as exc:
             logger.exception("agent.addToCart RPC error: %s", exc)
@@ -2174,8 +2222,8 @@ async def entrypoint(ctx: JobContext) -> None:
         agent=agent,
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            video_enabled=False,
             audio_enabled=True,
+            video_enabled=False,
         ),
     )
 

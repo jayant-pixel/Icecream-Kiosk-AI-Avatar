@@ -352,68 +352,96 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
 
     if (mode === "detail") {
       return (
-        <div className="space-y-4">
-          <div className="flex h-48 w-full items-center justify-center rounded-2xl bg-white">
-            {primaryCard.imageUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={primaryCard.imageUrl}
-                alt={primaryCard.name ?? "Menu item"}
-                className="h-full w-full rounded-2xl object-contain p-2"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
-                Scoop
-              </div>
-            )}
-          </div>
-          <div className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-                  Scoop recommends
-                </p>
-                <h3 className="text-xl font-semibold text-[color:var(--icecream-dark)]">
-                  {primaryCard.name ?? "Treat"}
-                </h3>
-              </div>
-              <span className="text-lg font-semibold text-[color:var(--icecream-primary)]">
-                {formatPrice({
-                  aed: primaryCard.priceAED,
-                })}
-              </span>
+        <div className="flex flex-col h-full">
+          <div className="relative flex-1 w-full overflow-hidden rounded-[32px] bg-white p-6 shadow-xl border border-black/5 overflow-y-auto scrollbar-thin scrollbar-thumb-black/10 scrollbar-track-transparent">
+            <div className="flex h-56 w-full items-center justify-center rounded-2xl bg-black/5 mb-6 shadow-inner shrink-0">
+              {primaryCard.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={primaryCard.imageUrl}
+                  alt={primaryCard.name ?? "Menu item"}
+                  className="h-full w-full rounded-2xl object-contain p-4 transition-transform duration-500 hover:scale-105"
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center rounded-2xl text-sm font-semibold text-[color:var(--icecream-primary)]">
+                  Scoop
+                </div>
+              )}
             </div>
-            {primaryCard.description ? (
-              <p className="text-sm leading-relaxed text-black/70">{primaryCard.description}</p>
-            ) : null}
-            {primaryLabels.length > 0 ? (
-              <div className="flex flex-wrap gap-2 text-xs text-black/60">
-                {primaryLabels.map((label) => {
-                  const key = `${primaryCard.id ?? primaryCard.productId ?? primaryCard.name ?? "treat"}-${label}`;
-                  return (
-                    <span key={key} className="rounded-full bg-black/5 px-2 py-1">
-                      {label}
+
+            <div className="space-y-4 flex-1">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-2 py-0.5 rounded-full bg-[color:var(--icecream-primary)]/10 text-[10px] font-bold uppercase tracking-wider text-[color:var(--icecream-primary)]">
+                      Scoop recommends
                     </span>
-                  );
-                })}
+                  </div>
+                  <h3 className="text-2xl font-bold text-[color:var(--icecream-dark)] leading-tight">
+                    {primaryCard.name ?? "Treat"}
+                  </h3>
+                </div>
+                <span className="text-xl font-bold text-[color:var(--icecream-primary)] bg-black/5 px-3 py-1 rounded-xl shadow-sm">
+                  {formatPrice({
+                    aed: primaryCard.priceAED,
+                  })}
+                </span>
               </div>
-            ) : null}
-            <button
-              type="button"
-              disabled={!agent || isPendingPrimary}
-              onClick={() => handleAddToCartClick(primaryCard)}
-              className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-full bg-[color:var(--icecream-primary)] px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isPendingPrimary ? "Adding..." : "Add to cart"}
-            </button>
-            {!agent ? (
-              <p className="text-xs text-center text-black/50">Scoop is getting ready to respond.</p>
-            ) : null}
-            {agent && isPendingPrimary ? (
-              <p className="text-xs text-center text-[color:var(--icecream-primary)]/80">
-                Letting Scoop know about your pick...
-              </p>
-            ) : null}
+
+              {primaryCard.description ? (
+                <p className="text-sm leading-relaxed text-black/70 font-medium">{primaryCard.description}</p>
+              ) : null}
+
+              {primaryLabels.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {primaryLabels.map((label) => {
+                    const key = `${primaryCard.id ?? primaryCard.productId ?? primaryCard.name ?? "treat"}-${label}`;
+                    return (
+                      <span key={key} className="rounded-full bg-black/5 border border-black/5 px-3 py-1 text-xs font-semibold text-black/60 shadow-sm">
+                        {label}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              <div className="pt-4">
+                <button
+                  type="button"
+                  disabled={!agent || isPendingPrimary}
+                  onClick={() => handleAddToCartClick(primaryCard)}
+                  className="group relative w-full overflow-hidden rounded-2xl bg-[color:var(--icecream-primary)] px-6 py-4 text-sm font-bold text-white shadow-lg transition-all hover:shadow-[0_0_20px_rgba(240,66,153,0.4)] hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:shadow-none"
+                >
+                  <div className="relative z-10 flex items-center justify-center gap-2">
+                    {isPendingPrimary ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span>Adding to cart...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Add to cart</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 transition-transform group-hover:translate-x-1">
+                          <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+                        </svg>
+                      </>
+                    )}
+                  </div>
+                </button>
+
+                {!agent ? (
+                  <p className="mt-3 text-xs text-center font-medium text-black/40">Scoop is getting ready...</p>
+                ) : null}
+                {agent && isPendingPrimary ? (
+                  <p className="mt-3 text-xs text-center font-medium text-[color:var(--icecream-primary)] animate-pulse">
+                    Letting Scoop know about your pick...
+                  </p>
+                ) : null}
+              </div>
+            </div>
           </div>
         </div>
       );
@@ -424,97 +452,110 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
       const totalItems = cartItems.reduce((acc, item) => acc + item.qty, 0);
 
       return (
-        <div className="space-y-4">
-          <div className="flex h-40 w-full items-center justify-center rounded-2xl bg-white">
-            {primaryCard.imageUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={primaryCard.imageUrl}
-                alt={primaryCard.name ?? "Menu item"}
-                className="h-full w-full rounded-2xl object-contain p-2"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
-                Scoop
+        <div className="flex flex-col h-full">
+          <div className="relative flex-1 w-full overflow-hidden rounded-[32px] bg-white p-6 shadow-2xl border border-black/5">
+            <div className="flex h-40 w-full items-center justify-center rounded-2xl bg-black/5 mb-6 shadow-inner">
+              {primaryCard.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={primaryCard.imageUrl}
+                  alt={primaryCard.name ?? "Menu item"}
+                  className="h-full w-full rounded-2xl object-contain p-2"
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center rounded-2xl text-sm font-semibold text-[color:var(--icecream-primary)]">
+                  Scoop
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2 mb-6">
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                <p className="text-xs font-bold uppercase tracking-wide text-green-600">
+                  Added to your tray
+                </p>
               </div>
-            )}
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-              Added to your tray
-            </p>
-            <h3 className="text-xl font-semibold text-[color:var(--icecream-dark)]">
-              {primaryCard.name ?? "Treat"}
-            </h3>
-            <p className="text-sm text-black/70">Scoop is keeping it chilled while you finish up.</p>
-          </div>
-          {hasCartItems ? (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-black/40">
-                <span>Tray overview</span>
-                <span>
-                  {totalItems} item{totalItems === 1 ? "" : "s"}
-                </span>
-              </div>
-              <div className="flex max-h-48 flex-wrap gap-3 overflow-y-auto pr-1">
-                {cartItems.map(({ key, card, qty }) => {
-                  const label = card.name ?? "Treat";
-                  return (
-                    <div
-                      key={key}
-                      className="flex w-[108px] flex-col items-center gap-2 rounded-2xl bg-white/80 p-2 text-center shadow-sm"
-                    >
-                      <div className="relative h-20 w-full overflow-hidden rounded-xl">
-                        {card.imageUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={card.imageUrl} alt={label} className="h-full w-full object-contain p-1" />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center rounded-xl bg-[color:var(--icecream-primary)]/10 text-xs font-semibold text-[color:var(--icecream-primary)]">
-                            Scoop
-                          </div>
-                        )}
-                        <span className="absolute right-1 top-1 rounded-full bg-[color:var(--icecream-dark)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white shadow">
-                          x{qty}
-                        </span>
+              <h3 className="text-2xl font-bold text-[color:var(--icecream-dark)]">
+                {primaryCard.name ?? "Treat"}
+              </h3>
+              <p className="text-sm font-medium text-black/60">Scoop is keeping it chilled while you finish up.</p>
+            </div>
+
+            {hasCartItems ? (
+              <div className="space-y-4 mb-6">
+                <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wide text-black/40 border-b border-black/5 pb-2">
+                  <span>Tray overview</span>
+                  <span>
+                    {totalItems} item{totalItems === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <div className="flex max-h-48 flex-wrap gap-3 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-black/10 scrollbar-track-transparent">
+                  {cartItems.map(({ key, card, qty }) => {
+                    const label = card.name ?? "Treat";
+                    return (
+                      <div
+                        key={key}
+                        className="group flex w-[108px] flex-col items-center gap-2 rounded-2xl bg-white p-2 text-center shadow-sm border border-black/5 transition-transform hover:-translate-y-1"
+                      >
+                        <div className="relative h-20 w-full overflow-hidden rounded-xl bg-black/5">
+                          {card.imageUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={card.imageUrl} alt={label} className="h-full w-full object-contain p-1" />
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center rounded-xl text-xs font-semibold text-[color:var(--icecream-primary)]">
+                              Scoop
+                            </div>
+                          )}
+                          <span className="absolute right-1 top-1 rounded-full bg-[color:var(--icecream-dark)] px-2 py-0.5 text-[10px] font-bold text-white shadow-md">
+                            x{qty}
+                          </span>
+                        </div>
+                        <p className="line-clamp-2 text-xs font-bold text-[color:var(--icecream-dark)] leading-tight">{label}</p>
+                        <p className="text-[11px] font-medium text-black/50">
+                          {formatPrice({
+                            aed: card.priceAED ?? undefined,
+                          })}
+                        </p>
                       </div>
-                      <p className="line-clamp-2 text-xs font-medium text-[color:var(--icecream-dark)]">{label}</p>
-                      <p className="text-[11px] text-black/50">
-                        {formatPrice({
-                          aed: card.priceAED ?? undefined,
-                        })}
-                      </p>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          ) : null}
-          <div className="rounded-2xl bg-black/5 p-4 text-sm text-black/70">
-            <div className="flex justify-between">
-              <span>Subtotal</span>
-              <span>{resolveSummaryValue("subtotal")}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Tax</span>
-              <span>{resolveSummaryValue("tax")}</span>
-            </div>
-            <div className="mt-2 flex justify-between text-base font-semibold text-[color:var(--icecream-dark)]">
-              <span>Total</span>
-              <span>{resolveSummaryValue("total")}</span>
-            </div>
-            {summaryMessage ? (
-              <p className="mt-2 text-xs uppercase tracking-wide text-[color:var(--icecream-primary)]">
-                {summaryMessage}
-              </p>
             ) : null}
+
+            <div className="mt-auto rounded-2xl bg-black/5 p-5">
+              <div className="space-y-2 text-sm font-medium text-black/70">
+                <div className="flex justify-between">
+                  <span>Subtotal</span>
+                  <span>{resolveSummaryValue("subtotal")}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Tax</span>
+                  <span>{resolveSummaryValue("tax")}</span>
+                </div>
+                <div className="pt-2 border-t border-black/5 flex justify-between text-lg font-bold text-[color:var(--icecream-dark)]">
+                  <span>Total</span>
+                  <span>{resolveSummaryValue("total")}</span>
+                </div>
+              </div>
+              {summaryMessage ? (
+                <p className="mt-3 text-xs font-bold uppercase tracking-wide text-[color:var(--icecream-primary)]">
+                  {summaryMessage}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <p className="text-xs text-center font-medium text-black/50">Settle up at the counter whenever you&rsquo;re ready.</p>
+              <button
+                type="button"
+                className="w-full rounded-xl bg-[color:var(--icecream-dark)] px-4 py-3.5 text-sm font-bold text-white shadow-lg transition-all hover:bg-black hover:shadow-xl active:scale-95"
+              >
+                Pay at the Counter
+              </button>
+            </div>
           </div>
-          <p className="text-xs text-black/60">Settle up at the counter whenever you&rsquo;re ready.</p>
-          <button
-            type="button"
-            className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-[color:var(--icecream-dark)] px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:brightness-105"
-          >
-            Pay at the Counter
-          </button>
         </div>
       );
     }
@@ -535,10 +576,10 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
           type="button"
           onClick={() => setActiveCategory(category.slug)}
           className={clsx(
-            "rounded-full px-4 py-2 text-sm font-medium transition",
+            "rounded-full px-5 py-2.5 text-sm font-bold transition-all duration-300",
             isActive
-              ? "bg-[color:var(--icecream-primary)] text-white"
-              : "bg-black/5 text-black/70 hover:bg-[color:var(--icecream-primary)]/10 hover:text-[color:var(--icecream-primary)]",
+              ? "bg-[color:var(--icecream-primary)] text-white shadow-md shadow-[color:var(--icecream-primary)]/25"
+              : "bg-white text-black/60 hover:bg-black/5 hover:text-[color:var(--icecream-primary)] hover:shadow-sm",
             isVertical ? "w-full text-left" : "whitespace-nowrap"
           )}
         >
@@ -549,74 +590,88 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
   };
 
   const menuPanel = showMenuPanel ? (
-    <div className={clsx("pointer-events-auto w-full max-w-5xl px-4 pb-6 lg:px-0", className)}>
-      <div className="rounded-[28px] border border-white/40 bg-white/95 p-6 shadow-2xl backdrop-blur-xl text-[color:var(--icecream-dark)]">
-        <div className="flex flex-col gap-6 lg:flex-row">
-          <aside className="hidden w-56 shrink-0 rounded-[24px] border border-black/5 bg-white/85 px-5 py-6 lg:flex lg:flex-col lg:gap-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-black/40">Browse</p>
-            <div className="mt-4 flex flex-col gap-3">{renderCategoryButtons("vertical")}</div>
+    <div className={clsx("pointer-events-auto w-full max-w-6xl px-4 pb-6 lg:px-0 mx-auto", className)}>
+      <div className="rounded-[40px] border border-black/5 bg-white p-8 shadow-2xl text-[color:var(--icecream-dark)]">
+        <div className="flex flex-col gap-8 lg:flex-row">
+          <aside className="hidden w-64 shrink-0 rounded-[32px] border border-black/5 bg-black/5 px-6 py-8 lg:flex lg:flex-col lg:gap-4">
+            <div className="flex items-center gap-2 mb-2 px-2">
+              <div className="h-1.5 w-1.5 rounded-full bg-[color:var(--icecream-primary)]" />
+              <p className="text-xs font-bold uppercase tracking-widest text-black/40">Browse Menu</p>
+            </div>
+            <div className="flex flex-col gap-2">{renderCategoryButtons("vertical")}</div>
           </aside>
+
           <div className="flex-1 max-w-full">
-            <div className="flex flex-col gap-1">
-              <h2 className="text-xl font-semibold">Scoop&apos;s Menu</h2>
-              <p className="text-sm text-black/60">
+            <div className="flex flex-col gap-2 mb-6">
+              <h2 className="text-3xl font-bold tracking-tight">Scoop&apos;s Menu</h2>
+              <p className="text-base font-medium text-black/50">
                 {query
                   ? `Showing flavours inspired by "${query}".`
                   : `Now browsing: ${activeCategoryLabel}.`}
               </p>
             </div>
-            <div className="mt-4 flex gap-2 overflow-x-auto lg:hidden">{renderCategoryButtons("horizontal")}</div>
-            <div className="mt-4 max-h-[65vh] overflow-y-auto pr-1 lg:pr-4">
+
+            <div className="mb-6 flex gap-2 overflow-x-auto pb-2 lg:hidden scrollbar-hide">{renderCategoryButtons("horizontal")}</div>
+
+            <div className="max-h-[65vh] overflow-y-auto pr-2 lg:pr-4 scrollbar-thin scrollbar-thumb-[color:var(--icecream-primary)]/20 scrollbar-track-transparent">
               {filteredMenuCards.length ? (
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                   {filteredMenuCards.map((item) => (
                     <article
                       key={item.id ?? item.productId ?? item.name}
-                      className="flex h-full flex-col rounded-3xl border border-black/5 bg-white/90 p-4 shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
+                      className="group flex h-full flex-col rounded-[28px] border border-black/5 bg-white p-4 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-[0_10px_30px_rgba(0,0,0,0.05)]"
                     >
-                      <div className="flex h-40 w-full items-center justify-center rounded-2xl bg-white">
+                      <div className="relative flex h-48 w-full items-center justify-center rounded-2xl bg-black/5 overflow-hidden">
                         {item.imageUrl ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={item.imageUrl}
                             alt={item.name ?? "Menu item"}
-                            className="h-full w-full rounded-2xl object-contain p-2"
+                            className="h-full w-full object-contain p-4 transition-transform duration-500 group-hover:scale-110"
                           />
                         ) : (
-                          <div className="flex h-full w-full items-center justify-center rounded-2xl bg-[color:var(--icecream-primary)]/10 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                          <div className="flex h-full w-full items-center justify-center rounded-2xl text-sm font-semibold text-[color:var(--icecream-primary)]">
                             Scoop
                           </div>
                         )}
+                        <button
+                          type="button"
+                          disabled={!agent}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleAddToCartClick(item);
+                          }}
+                          className="absolute bottom-3 right-3 h-10 w-10 rounded-full bg-[color:var(--icecream-primary)] text-white shadow-lg flex items-center justify-center opacity-0 translate-y-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-y-0 hover:bg-[color:var(--icecream-primary)]/90 disabled:opacity-0"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+                            <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+                          </svg>
+                        </button>
                       </div>
-                      <div className="mt-4 flex flex-1 flex-col">
-                        <h4 className="text-base font-semibold text-[color:var(--icecream-dark)]">
-                          {item.name ?? "Treat"}
-                        </h4>
-                        {item.description ? (
-                          <p className="mt-2 text-sm leading-snug text-black/60 line-clamp-3">{item.description}</p>
-                        ) : null}
-                        <div className="mt-auto flex items-center justify-between pt-4">
-                      <span className="text-sm font-semibold text-[color:var(--icecream-primary)]">
-                        {formatPrice({
-                          aed: item.priceAED,
-                        })}
-                      </span>
-                          <button
-                            type="button"
-                            disabled={!agent}
-                            onClick={() => handleAddToCartClick(item)}
-                            className="rounded-full border border-[color:var(--icecream-primary)] px-4 py-1 text-xs font-semibold text-[color:var(--icecream-primary)] transition hover:bg-[color:var(--icecream-primary)] hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            Add
-                          </button>
+
+                      <div className="mt-5 flex flex-1 flex-col px-1">
+                        <div className="flex justify-between items-start gap-2">
+                          <h4 className="text-lg font-bold text-[color:var(--icecream-dark)] leading-tight">
+                            {item.name ?? "Treat"}
+                          </h4>
+                          <span className="shrink-0 text-sm font-bold text-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)]/5 px-2 py-1 rounded-lg">
+                            {formatPrice({
+                              aed: item.priceAED,
+                            })}
+                          </span>
                         </div>
+
+                        {item.description ? (
+                          <p className="mt-2 text-sm font-medium leading-relaxed text-black/50 line-clamp-2">{item.description}</p>
+                        ) : null}
                       </div>
                     </article>
                   ))}
                 </div>
               ) : (
-                <div className="rounded-3xl bg-white/85 p-6 text-sm text-black/60 shadow-inner">
-                  No treats in this category yet. Try another request!
+                <div className="flex flex-col items-center justify-center h-64 rounded-[32px] bg-black/5 border border-dashed border-black/10 text-center p-8">
+                  <p className="text-lg font-semibold text-black/40">No treats in this category yet.</p>
+                  <p className="text-sm text-black/30 mt-1">Try asking Scoop for something else!</p>
                 </div>
               )}
             </div>
@@ -630,14 +685,13 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
 
   const detailCard = detailPanelContent ? (
     <div className="flex w-full justify-center lg:justify-end">
-      <div className="pointer-events-auto w-full max-w-md px-4 pb-4 lg:fixed lg:right-8 lg:top-1/2 lg:w-auto lg:max-w-sm lg:-translate-y-1/2 lg:px-0 lg:pb-0 lg:z-30">
-        <div className="max-h-[85vh] overflow-y-auto rounded-[28px] border border-white/40 bg-white/95 p-6 shadow-2xl backdrop-blur-xl text-[color:var(--icecream-dark)]">
+      <div className="pointer-events-auto w-full max-w-md px-4 pb-4 lg:fixed lg:right-12 lg:top-1/2 lg:w-auto lg:max-w-[400px] lg:-translate-y-1/2 lg:px-0 lg:pb-0 lg:z-30">
+        <div className="max-h-[85vh] overflow-y-auto rounded-[32px] shadow-2xl">
           {detailPanelContent}
         </div>
       </div>
     </div>
   ) : null;
-
 
   return (
     <>
@@ -645,12 +699,15 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
       {detailCard}
 
       {directions && directions.action === "show" ? (
-        <div className="pointer-events-none fixed bottom-24 left-1/2 z-30 w-full max-w-sm -translate-x-1/2 px-4 sm:left-auto sm:right-6 sm:translate-x-0">
-          <div className="pointer-events-auto rounded-[28px] border border-white/40 bg-white/95 p-5 shadow-2xl backdrop-blur-md text-[color:var(--icecream-dark)]">
-            <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-              Pickup Spot
-            </p>
-            <h3 className="text-lg font-semibold">
+        <div className="pointer-events-none fixed bottom-24 left-1/2 z-30 w-full max-w-sm -translate-x-1/2 px-4 sm:left-auto sm:right-8 sm:translate-x-0">
+          <div className="pointer-events-auto rounded-[32px] border border-black/5 bg-white p-6 shadow-2xl text-[color:var(--icecream-dark)]">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="h-2 w-2 rounded-full bg-[color:var(--icecream-primary)] animate-pulse" />
+              <p className="text-xs font-bold uppercase tracking-wide text-[color:var(--icecream-primary)]">
+                Pickup Spot
+              </p>
+            </div>
+            <h3 className="text-xl font-bold mb-4">
               {directions.display ?? directions.directions?.[0]?.displayName ?? "Pickup"}
             </h3>
             {directions.directions?.[0]?.mapImage ? (
@@ -658,24 +715,31 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
               <img
                 src={directions.directions[0].mapImage}
                 alt={directions.display ?? "Directions"}
-                className="mt-3 h-56 w-full rounded-xl object-cover"
+                className="h-56 w-full rounded-2xl object-cover shadow-md"
               />
             ) : null}
             {directions.directions?.[0]?.hint ? (
-              <p className="mt-3 text-sm text-black/70">{directions.directions[0].hint}</p>
+              <p className="mt-4 text-sm font-medium text-black/70 bg-black/5 p-3 rounded-xl border border-black/5">
+                {directions.directions[0].hint}
+              </p>
             ) : null}
           </div>
         </div>
       ) : null}
 
       {toast ? (
-        <div className="pointer-events-none fixed bottom-10 left-1/2 z-40 w-full max-w-xs -translate-x-1/2 px-4 sm:left-auto sm:right-6 sm:translate-x-0">
-          <div className="flex items-center gap-3 rounded-2xl bg-[color:var(--icecream-primary)] px-4 py-3 text-white shadow-xl">
+        <div className="pointer-events-none fixed bottom-12 left-1/2 z-50 w-full max-w-xs -translate-x-1/2 px-4 sm:left-auto sm:right-8 sm:translate-x-0">
+          <div className="flex items-center gap-4 rounded-2xl bg-[color:var(--icecream-dark)] px-5 py-4 text-white shadow-2xl border border-white/10">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[color:var(--icecream-primary)] text-white shadow-lg">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+                <path fillRule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z" clipRule="evenodd" />
+              </svg>
+            </div>
             <div className="flex-1">
-              <p className="text-sm font-semibold">
+              <p className="text-sm font-bold">
                 Added {toast.qty} x {toast.product.name ?? "treat"}
               </p>
-              <p className="text-xs opacity-80">
+              <p className="text-xs opacity-70 font-medium mt-0.5">
                 {formatPrice({
                   aed: toast.product.priceAED ?? undefined,
                 })}
