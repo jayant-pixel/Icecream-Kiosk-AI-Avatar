@@ -681,6 +681,7 @@ function ProductGridOverlay({
   );
 }
 
+
 function ProductDetailOverlay({
   payload,
   cartIndicator,
@@ -705,56 +706,70 @@ function ProductDetailOverlay({
     <div className="space-y-4">
       <HeaderBar cartIndicator={cartIndicator} subtitle={product.category ?? "Treat detail"} showBack />
       <div className="rounded-[28px] border border-black/5 bg-white/95 p-4 shadow-inner">
-        <div className="flex flex-col gap-6 lg:flex-row">
+        <div className="flex flex-col gap-4 lg:flex-row">
           <div className="w-full lg:w-1/3">
-            <CardImage src={product?.imageUrl} alt={product?.name} className="h-60" />
+            <CardImage src={product?.imageUrl} alt={product?.name} className="h-48" />
           </div>
-          <div className="flex-1 space-y-3">
+          <div className="flex-1 space-y-2">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{product?.category}</p>
-              <h2 className="text-2xl font-semibold text-black">{product?.name ?? "Treat"}</h2>
-              <p className="text-sm text-black/60">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{product?.category}</p>
+              <h2 className="text-xl font-semibold text-black">{product?.name ?? "Treat"}</h2>
+              <p className="text-xs text-black/60">
                 Size: {product?.size ?? "-"}
                 {typeof product?.scoops === "number" ? ` · ${product?.scoops} scoop${product?.scoops === 1 ? "" : "s"}` : null}
               </p>
-              {product.display ? <p className="text-xs text-black/60">Pickup: {product.display}</p> : null}
+              {product.display ? <p className="text-[10px] text-black/60">Pickup: {product.display}</p> : null}
             </div>
-            <div className="rounded-2xl bg-black/5 px-4 py-3 text-sm font-semibold text-[color:var(--icecream-primary)]">
-              Base: {formatDirham(product?.priceAED)}
+            <div className="flex items-baseline gap-2">
+              <span className="text-lg font-bold text-[color:var(--icecream-primary)]">{formatDirham(product?.priceAED)}</span>
+              <span className="text-xs text-black/40">base price</span>
             </div>
-            <div className="rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
-              Free Flavors: {product?.scoops ?? 0}
-              <br />
-              Free Toppings: {product?.includedToppings ?? 0} ({product?.category ?? "Treat"})
+            <div className="rounded-xl bg-black/5 px-3 py-2 text-xs text-black/70">
+              <div className="flex justify-between">
+                <span>Included Flavors</span>
+                <span className="font-medium">{product?.scoops ?? 0}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Included Toppings</span>
+                <span className="font-medium">{product?.includedToppings ?? 0}</span>
+              </div>
             </div>
-            <div className="flex flex-wrap gap-2 text-xs">
+            <div className="flex flex-wrap gap-2 text-[10px]">
               <ActionPill label="Choose Flavors" />
               <ActionPill label="Add Toppings" />
             </div>
-            <div className="flex items-center gap-3 text-sm font-semibold">
-              Quantity:
-              <QuantityBadge />
-              <button type="button" className="rounded-full bg-[color:var(--icecream-primary)] px-4 py-2 text-sm font-semibold text-black">
+
+            <div className="flex items-center gap-2 pt-1">
+              <div className="flex items-center gap-2 rounded-full border border-black/10 bg-white px-3 py-1 shadow-sm">
+                <span className="text-[10px] font-bold uppercase text-black">Qty</span>
+                <QuantityBadge />
+              </div>
+              <button type="button" className="flex-1 rounded-full bg-[color:var(--icecream-primary)] px-4 py-2 text-sm font-bold text-white shadow-md transition-transform active:scale-95 hover:scale-105">
                 Add to Cart
               </button>
             </div>
           </div>
         </div>
+
+        {/* Integrated Summaries */}
+        <div className="mt-4 space-y-2 border-t border-black/5 pt-2">
+          <SelectionSummary
+            title="Selected Flavors"
+            summary={payload.flavorSummary}
+            items={payload.selectedFlavors}
+            emptyLabel="No flavors selected."
+            actionLabel="Change"
+          />
+          <SelectionSummary
+            title="Selected Toppings"
+            summary={payload.toppingSummary}
+            items={payload.selectedToppings}
+            emptyLabel="No toppings selected."
+            actionLabel="Change"
+          />
+        </div>
       </div>
-      <SelectionSummary
-        title="Selected Flavors"
-        summary={payload.flavorSummary}
-        items={payload.selectedFlavors}
-        emptyLabel="Flavors will appear here after selection."
-        actionLabel="Change Flavors"
-      />
-      <SelectionSummary
-        title="Selected Toppings"
-        summary={payload.toppingSummary}
-        items={payload.selectedToppings}
-        emptyLabel="Toppings will appear here after selection."
-        actionLabel="Change Toppings"
-      />
+
       {upgrade?.show ? <UpgradeBanner payload={upgrade} /> : null}
       <SizeOptions sizeOptions={payload.sizeOptions} />
     </div>
@@ -796,7 +811,7 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
               <article
                 key={flavor.id ?? flavor.name}
                 className={clsx(
-                  "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all",
+                  "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all cursor-pointer hover:shadow-md",
                   selected && "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
                 )}
               >
@@ -805,15 +820,16 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
                   <p className="text-base font-semibold text-[color:var(--icecream-dark)]">{flavor.name}</p>
                   <p className="text-[11px] uppercase tracking-wide text-black/50">{flavor.classification ?? ""}</p>
                 </div>
-                <button
-                  type="button"
-                  className={clsx(
-                    "mt-4 inline-flex w-full items-center justify-center rounded-full border px-4 py-2 text-sm font-semibold",
-                    selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-black" : "border-black/10 bg-white text-black/70"
-                  )}
-                >
-                  {selected ? "Selected ✓" : "Select"}
-                </button>
+                {selected && (
+                  <div className="mt-3 flex items-center justify-center">
+                    <span className="inline-flex items-center gap-1 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                      <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                      Selected
+                    </span>
+                  </div>
+                )}
               </article>
             );
           })}
@@ -1116,10 +1132,9 @@ function ActionPill({ label, minimal }: { label: string; minimal?: boolean }) {
     </button>
   );
 }
-
 function QuantityBadge({ value = 1 }: { value?: number }) {
   return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-black/10 px-3 py-1 text-xs font-semibold">
+    <span className="inline-flex items-center gap-2 rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black">
       – {value} +
     </span>
   );
@@ -1180,7 +1195,7 @@ function ToppingPriceGroup({ title, items, selectedIds }: { title: string; items
             <article
               key={item.id ?? item.name}
               className={clsx(
-                "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all",
+                "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all cursor-pointer hover:shadow-md",
                 selected && "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
               )}
             >
@@ -1189,15 +1204,16 @@ function ToppingPriceGroup({ title, items, selectedIds }: { title: string; items
                 <p className="text-base font-semibold text-[color:var(--icecream-dark)]">{item.name}</p>
                 <p className="text-sm text-black/60">{formatDirham(item.priceAED)}</p>
               </div>
-              <button
-                type="button"
-                className={clsx(
-                  "mt-4 inline-flex w-full items-center justify-center rounded-full border px-4 py-2 text-sm font-semibold",
-                  selected ? "border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)] text-black" : "border-black/10 bg-white text-black/70"
-                )}
-              >
-                {selected ? "Selected ✓" : "Select"}
-              </button>
+              {selected && (
+                <div className="mt-3 flex items-center justify-center">
+                  <span className="inline-flex items-center gap-1 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                    <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                    Selected
+                  </span>
+                </div>
+              )}
             </article>
           );
         })}
@@ -1243,7 +1259,7 @@ function CartToppingList({ toppings }: { toppings?: CartTopping[] }) {
               name={topping.name}
               descriptor={topping.isFree ? "Included" : "Charged add-on"}
               qty={topping.qty}
-              price={resolveLinePrice(topping)}
+              price={topping.isFree ? 0 : resolveLinePrice(topping)}
             />
           ))}
         </div>
@@ -1326,4 +1342,5 @@ function formatDirham(value?: number | null) {
   }
   return "0.00 dirham";
 }
+
 

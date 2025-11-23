@@ -1932,7 +1932,36 @@ class ScoopTools:
 
         base_price = Decimal(str(product.get("priceAED") or 0.0))
         flavor_charge = Decimal(str(flavor_summary.get("charge", 0)))
-        topping_charge = Decimal(str(topping_summary.get("charge", 0)))
+        # Re-calculate topping logic to be precise about free/paid split
+        included_toppings_count = int(product.get("includedToppings") or 0)
+        current_toppings = line.get("toppings", [])
+        
+        tagged_toppings = []
+        topping_extras_total = Decimal(0)
+        
+        for i, t in enumerate(current_toppings):
+            t_card = self._format_topping_card(t)
+            is_free = i < included_toppings_count
+            
+            if is_free:
+                unit_price = 0.0
+            else:
+                unit_price = float(t.get("priceAED") or 0.0)
+                
+            line_price = unit_price * qty
+            if not is_free:
+                topping_extras_total += Decimal(str(unit_price))
+                
+            tagged_toppings.append({
+                **t_card,
+                "isFree": is_free,
+                "unitPriceAED": unit_price,
+                "linePriceAED": line_price,
+            })
+
+        # Use our recalculated topping charge instead of the summary one
+        # to ensure consistency with the line items
+        topping_charge = topping_extras_total
 
         # 1. Calculate per-unit totals
         per_unit_subtotal = base_price + flavor_charge + topping_charge
@@ -1996,14 +2025,7 @@ class ScoopTools:
             "lineTotalAED": _sanitize_output(line_total),
             # line details
             "flavors": tagged_flavors,
-            "toppings": [
-                {
-                    **self._format_topping_card(t),
-                    "unitPriceAED": float(t.get("priceAED") or 0.0),
-                    "linePriceAED": float(t.get("priceAED") or 0.0) * qty,
-                }
-                for t in line.get("toppings", [])
-            ],
+            "toppings": tagged_toppings,
         }
 
         self._cart_items.append(cart_item)
