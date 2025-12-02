@@ -210,7 +210,9 @@ When you call tools:
   `get_directions(display_name="Ice Cream Bar"/"Sundae Counter"/"Milkshake Bar")`
 
 ❗ Never call `list_menu` without `kind`.  
-❗ For Quick Order, use `query` instead of forcing the user to pick from the menu.
+❗ For Quick Order, use `query` instead of forcing the user to pick from the menu.  
+❗ If the guest gives a full order (item + flavors/toppings), first repeat it back and ask for YES/NO before calling any tools. Do not fire tools until they confirm.  
+❗ After every tool call, briefly say what changed (flavors/toppings added, free slots remaining, or cart total) and ask the next question. Do not stay silent.
 
 ---
 
@@ -246,16 +248,30 @@ When a guest chooses an item (by touch or by name):
 1. Show detail card:  
    `list_menu(kind="products", product_id=..., view="detail")`
 2. **Do NOT pick Flavors or Toppings automatically.**
-3. Immediately open the flavor board:  
+3. If the product needs flavor choices (cups, sundaes, or the Make Your Own Thick Shake), open the flavor board:  
    `list_menu(kind="flavors", product_id=...)`
-4. Say:  
-   “Great choice. I’ve opened the flavor menu for you. Which flavors would you like?”
+   - Signature thick shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure) already come pre-blended, so skip straight to toppings for those.
+4. When flavors are required say:  
+   "Great choice. I've opened the flavor menu for you. Which flavors would you like?"
 
 ## STEP B — Flavor Selection  
 - When the guest names flavors, call:  
   `choose_flavors(product_id=..., flavor_ids=[...])`
 - Then refresh the product card:  
   `list_menu(kind="products", product_id=..., view="detail")`
+- Always tell them the **exact number of free flavors** included (match the scoop count/allowance):  
+  “This item includes {{scoop_count}} free flavors.”
+- If they try to add more than the free count, state the charge clearly before applying:  
+  “Extra flavors will be charged at {{defaultFlavorPriceAED}} dirham per flavor. Would you like to add it?”
+- After each flavor is selected, give a helpful suggestion based on their situation:
+  1) Free slots are still available:  
+     “Would you like to swap {{flavor_a}} with {{flavor_b}}? It might taste even better, and the swap is free.”
+  2) All free slots are used — suggest a swap between the chosen flavors:  
+     “You’ve chosen {{flavor_x}} and {{flavor_y}}. If you like, we can swap {{flavor_x}} with {{flavor_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
+  3) All free slots are used — suggest adding a paid extra:  
+     “{{flavor_c}} would also go very well with your mix. Would you like to add it for {{defaultFlavorPriceAED}} dirham?”
+  If they say no:  
+     “No problem. Just letting you know, extra flavors cost {{defaultFlavorPriceAED}} dirham each if you change your mind.”
 
 If all free scoops are used:
 - Immediately switch to toppings:  
@@ -264,7 +280,7 @@ If all free scoops are used:
   “Would you like to add toppings?”
 
 If more scoops remain:
-- Ask: “And your next flavor?”
+- Ask: “You still have {{remaining}} free flavor{{plural}}. Would you like to add it or keep it as it is?”
 
 ## STEP C — Topping Selection  
 When the guest names toppings:
@@ -272,6 +288,15 @@ When the guest names toppings:
 - Refresh detail card again:  
   `list_menu(kind="products", product_id=..., view="detail")`
 - Confirm the choices politely.
+- After each topping is selected, give a helpful suggestion based on their situation:
+  1) Free topping slots are still available:  
+     “Would you like to swap {{topping_a}} with {{topping_b}}? It might taste even better, and the swap is free.”
+  2) All free topping slots are used — suggest a swap between chosen toppings:  
+     “You’ve chosen {{topping_x}} and {{topping_y}}. If you like, we can swap {{topping_x}} with {{topping_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
+  3) All free topping slots are used — suggest adding a paid extra:  
+     “{{topping_c}} would also go very well with your mix. Would you like to add it for {{extraToppingPriceAED}} dirham?”
+  If they say no:  
+     “No problem. Just letting you know, extra toppings cost {{extraToppingPriceAED}} dirham each if you change your mind.”
 
 If they say “no toppings”:
 - Skip toppings entirely.
@@ -345,13 +370,26 @@ After the guest confirms:
    If they clearly said “no toppings”, do not call `choose_toppings`.
 
 3. Check your internal understanding of free scoops and free toppings:
+   - Always restate the free flavor allowance numerically:  
+     “This includes {{scoop_count}} free flavors.”
    - If they have **free scoops remaining**, say:  
-     “You still have free flavor choice remaining. Would you like to add another flavor or keep it as it is?”
+     “You still have {{remaining}} free flavor{{plural}}. Would you like to add another free flavor or keep it as it is?”
      - If they want to choose more visually, then:  
        `list_menu(kind="flavors", product_id=...)`
        `choose_flavors(product_id=..., flavor_ids=[...])`
     - Then refresh the product card:  
        `list_menu(kind="products", product_id=..., view="detail")`
+   - If they ask for flavors beyond the free count, warn before applying:  
+     “Extra flavors are charged at {{defaultFlavorPriceAED}} dirham each. Should I add it?”
+   - After each flavor is selected, give a helpful suggestion based on their situation:
+     1) Free slots are still available:  
+        “Would you like to swap {{flavor_a}} with {{flavor_b}}? It might taste even better, and the swap is free.”
+     2) All free slots are used — suggest a swap between the chosen flavors:  
+        “You’ve chosen {{flavor_x}} and {{flavor_y}}. If you like, we can swap {{flavor_x}} with {{flavor_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
+     3) All free slots are used — suggest adding a paid extra:  
+        “{{flavor_c}} would also go very well with your mix. Would you like to add it for {{defaultFlavorPriceAED}} dirham?”
+     If they say no:  
+        “No problem. Just letting you know, extra flavors cost {{defaultFlavorPriceAED}} dirham each if you change your mind.”
    - If the product includes free toppings and none were chosen, ask:  
      “You have free toppings included. Would you like to add any toppings, or keep it without toppings?”
      - If they want to see options, then:  
@@ -359,6 +397,15 @@ After the guest confirms:
         `choose_toppings(product_id=..., toppings_ids=[...])`
     - Then refresh the product card:  
        `list_menu(kind="products", product_id=..., view="detail")`
+- After each topping is selected, give a helpful suggestion based on their situation:
+  1) Free topping slots are still available:  
+     “Would you like to swap {{topping_a}} with {{topping_b}}? It might taste even better, and the swap is free.”
+  2) All free topping slots are used — suggest a swap between the chosen toppings:  
+     “You’ve chosen {{topping_x}} and {{topping_y}}. If you like, we can swap {{topping_x}} with {{topping_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
+  3) All free topping slots are used — suggest adding a paid extra:  
+     “{{topping_c}} would also go very well with your mix. Would you like to add it for {{extraToppingPriceAED}} dirham?”
+  If they say no:  
+     “No problem. Just letting you know, extra toppings cost {{extraToppingPriceAED}} dirham each if you change your mind.”
 
 
 4. When the item is complete and confirmed, add it directly to the cart:  
@@ -390,6 +437,12 @@ Quick Order must **not**:
 Menus are for:
 - when they ask to **see options**, or
 - when they want to use **remaining free scoops/toppings** visually.
+
+---
+
+# Thick Shake Rules
+- Signature thick shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure) are fixed recipes. Never offer extra flavor choices or open the flavor picker for them. Offer toppings only and remind the guest every topping is charged.
+- "Make Your Own Thick Shake" is the only shake that takes flavors. As soon as the guest selects it, brief them: "You'll receive three scoops, each about two point five ounce. You can pick three flavors and toppings are charged separately," then proceed to collect their flavors.
 
 ---
 
@@ -705,92 +758,101 @@ SCOOP_KB: Dict[str, Any] = {
         },
         "shake_chocolate_chiller_regular": {
             "id": "shake_chocolate_chiller_regular",
-            "name": "Chocolate Chiller Thick Shake — Regular",
+            "name": "Chocolate Chiller Thick Shake - Regular",
             "category": "Milk Shakes",
             "size": "Regular",
             "priceAED": 27,
             "description": "Chocolate mousse royale ice cream with vanilla ice cream..",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/nhk3ekf4_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_chocolate_chiller_large": {
             "id": "shake_chocolate_chiller_large",
-            "name": "Chocolate Chiller Thick Shake — Large",
+            "name": "Chocolate Chiller Thick Shake - Large",
             "category": "Milk Shakes",
             "size": "Large",
             "priceAED": 32,
             "description": "Chocolate mousse royale ice cream with vanilla ice cream.",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/igdoeihc_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_strawberry_mania_regular": {
             "id": "shake_strawberry_mania_regular",
-            "name": "Strawberry Mania Thick Shake — Regular",
+            "name": "Strawberry Mania Thick Shake - Regular",
             "category": "Milk Shakes",
             "size": "Regular",
             "priceAED": 27,
             "description": "Vanilla and very berry strawberry ice cream with banana pieces.",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i1yr0rqp_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_strawberry_mania_large": {
             "id": "shake_strawberry_mania_large",
-            "name": "Strawberry Mania Thick Shake — Large",
+            "name": "Strawberry Mania Thick Shake - Large",
             "category": "Milk Shakes",
             "size": "Large",
             "priceAED": 30,
             "description": "Vanilla and very berry strawberry ice cream with banana pieces..",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/aggee5ui_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_jamoca_fudge_regular": {
             "id": "shake_jamoca_fudge_regular",
-            "name": "Jamoca Fudge Thick Shake — Regular",
+            "name": "Jamoca Fudge Thick Shake - Regular",
             "category": "Milk Shakes",
             "size": "Regular",
             "priceAED": 27,
             "description": "Jamoca almond fudge ice cream.",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/h3cmi7b7_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_jamoca_fudge_large": {
             "id": "shake_jamoca_fudge_large",
-            "name": "Jamoca Fudge Thick Shake — Large",
+            "name": "Jamoca Fudge Thick Shake - Large",
             "category": "Milk Shakes",
             "size": "Large",
             "priceAED": 32,
             "description": "Jamoca almond fudge ice cream.",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/9i34ocls_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_praline_pleasure_regular": {
             "id": "shake_praline_pleasure_regular",
-            "name": "Praline Pleasure Thick Shake — Regular",
+            "name": "Praline Pleasure Thick Shake - Regular",
             "category": "Milk Shakes",
             "size": "Regular",
             "priceAED": 27,
             "description": "Pralines n cream ice cream with Jamoca almond fudge ice cream.",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/luqwa7y8_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_praline_pleasure_large": {
             "id": "shake_praline_pleasure_large",
-            "name": "Praline Pleasure Thick Shake — Large",
+            "name": "Praline Pleasure Thick Shake - Large",
             "category": "Milk Shakes",
             "size": "Large",
             "priceAED": 32,
             "description": "Pralines cream ice cream with Jamoca almond fudge ice cream.",
+            "allowFlavorSelection": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/5n85jghc_0.jpg",
             "display": "Milkshake Bar",
         },
         "shake_make_own_regular": {
             "id": "shake_make_own_regular",
-            "name": "Make Your Own Thick Shake — Regular (3 Scoops)",
+            "name": "Make Your Own Thick Shake - Regular (3 Scoops)",
             "category": "Milk Shakes",
             "size": "Regular",
             "scoops": 3,
             "priceAED": 25,
             "description": "Choose 3 flavors each with 2.5 ounce per scoop + unlimited toppings (charged).",
+            "allowFlavorSelection": True,
             "allowedFlavorNames": [
                 "Chocolate",
                 "Chocolate Chip",
@@ -1420,6 +1482,13 @@ class ScoopTools:
                 return record.get("displayName")
         return raw
 
+    def _product_allows_flavors(self, product: Optional[Dict[str, Any]]) -> bool:
+        if not product:
+            return False
+        if "allowFlavorSelection" in product:
+            return bool(product.get("allowFlavorSelection"))
+        return bool(product.get("scoops"))
+
     def _format_product_card(self, p: Dict[str, Any]) -> Dict[str, Any]:
         price = p.get("priceAED")
         display_name = self._canonical_display(p.get("display"))
@@ -1433,6 +1502,7 @@ class ScoopTools:
             "imageUrl": p.get("imageUrl") or self._kb["image_defaults"]["square"],
             "display": display_name,
             "includedToppings": p.get("includedToppings"),
+            "allowsFlavorSelection": self._product_allows_flavors(p),
         }
 
     def _format_flavor_card(self, f: Dict[str, Any]) -> Dict[str, Any]:
@@ -1461,9 +1531,59 @@ class ScoopTools:
             return self._products.get(product_id)
         if query:
             q = query.lower()
+
+            # 1) Fast path: simple substring match on name
             for p in self._products.values():
                 if q in (p.get("name") or "").lower():
                     return p
+
+            # 2) Token-based match to catch hyphen/spacing differences
+            q_tokens = _tokens_for_label(query)
+            if q_tokens:
+                # Build product token cache lazily
+                def product_tokens(pid: str, prod: Dict[str, Any]) -> set[str]:
+                    if pid in self._product_tokens_cache:
+                        return self._product_tokens_cache[pid]
+
+                    tokens = set()
+                    tokens |= _tokens_for_label(prod.get("name"))
+                    tokens |= _tokens_for_label(prod.get("category"))
+                    tokens |= _tokens_for_label(prod.get("size"))
+
+                    # Add common aliases to improve quick-order recognition
+                    cat = (prod.get("category") or "").lower()
+                    if "milk" in cat or "shake" in cat:
+                        tokens.update({"shake", "milkshake", "milkshakes"})
+                    if "sundae" in cat:
+                        tokens.add("sundae")
+                    if "cup" in cat:
+                        tokens.add("cup")
+
+                    self._product_tokens_cache[pid] = tokens
+                    return tokens
+
+                best_pid: Optional[str] = None
+                best_score = 0
+
+                for pid, prod in self._products.items():
+                    tokens = product_tokens(pid, prod)
+                    score = len(tokens & q_tokens)
+                    if score > best_score:
+                        best_score = score
+                        best_pid = pid
+                    elif score == best_score and best_pid:
+                        # Tie-breaker: keep existing product order priority
+                        try:
+                            if (
+                                self._product_order.index(pid)
+                                < self._product_order.index(best_pid)
+                            ):
+                                best_pid = pid
+                        except ValueError:
+                            pass
+
+                if best_pid and best_score > 0:
+                    return self._products.get(best_pid)
         return None
 
     def _get_or_create_line_state(self, product: Dict[str, Any]) -> Dict[str, Any]:
@@ -1496,16 +1616,68 @@ class ScoopTools:
         return self.SIZE_ALIAS.get(size.lower(), size.title())
 
     def _resolve_flavor(self, ref: str) -> Optional[Dict[str, Any]]:
-        return self._flavors.get(ref) or next(
+        # Direct id or exact name match
+        direct = self._flavors.get(ref) or next(
             (f for f in self._flavors.values() if f["name"].lower() == ref.lower()),
             None,
         )
+        if direct:
+            return direct
+
+        # Token-based match to handle partial names ("almond", "praline", etc.)
+        ref_tokens = _tokens_for_label(ref)
+        if not ref_tokens:
+            return None
+
+        def flavor_tokens(fid: str, flavor: Dict[str, Any]) -> set[str]:
+            if fid in self._flavor_tokens_cache:
+                return self._flavor_tokens_cache[fid]
+            tokens = _tokens_for_label(flavor.get("name"))
+            self._flavor_tokens_cache[fid] = tokens
+            return tokens
+
+        best_id: Optional[str] = None
+        best_score = 0
+        for fid, flavor in self._flavors.items():
+            tokens = flavor_tokens(fid, flavor)
+            score = len(tokens & ref_tokens)
+            if score > best_score:
+                best_score = score
+                best_id = fid
+
+        return self._flavors.get(best_id) if best_id and best_score > 0 else None
 
     def _resolve_topping(self, ref: str) -> Optional[Dict[str, Any]]:
-        return self._toppings.get(ref) or next(
+        # Direct id or exact name match
+        direct = self._toppings.get(ref) or next(
             (t for t in self._toppings.values() if t["name"].lower() == ref.lower()),
             None,
         )
+        if direct:
+            return direct
+
+        # Token-based match to handle partial names ("almonds", "hot fudge", "sprinkles")
+        ref_tokens = _tokens_for_label(ref)
+        if not ref_tokens:
+            return None
+
+        def topping_tokens(tid: str, topping: Dict[str, Any]) -> set[str]:
+            if tid in self._topping_tokens_cache:
+                return self._topping_tokens_cache[tid]
+            tokens = _tokens_for_label(topping.get("name"))
+            self._topping_tokens_cache[tid] = tokens
+            return tokens
+
+        best_id: Optional[str] = None
+        best_score = 0
+        for tid, topping in self._toppings.items():
+            tokens = topping_tokens(tid, topping)
+            score = len(tokens & ref_tokens)
+            if score > best_score:
+                best_score = score
+                best_id = tid
+
+        return self._toppings.get(best_id) if best_id and best_score > 0 else None
 
     # --- MODIFIED TOOLS: CLEAN SCHEMA (NO ctx, OPTIONAL ARGS) ---
     @function_tool(
@@ -1669,6 +1841,21 @@ class ScoopTools:
             line = self._get_or_create_line_state(target_product) if target_product else None
 
             if kind_normalized == "flavors":
+                if not target_product or not self._product_allows_flavors(target_product):
+                    note = "Flavor selection is not available for this product. Please proceed with toppings only."
+                    logger.info(
+                        "[TOOL] list_menu skipping flavors for product=%s | reason=disallowed",
+                        target_product_id,
+                    )
+                    return _sanitize_output(
+                        {
+                            "error": "flavor_selection_not_available",
+                            "productId": target_product_id,
+                            "productName": target_product.get("name") if target_product else None,
+                            "agentNote": note,
+                        }
+                    )
+
                 cards = [self._format_flavor_card(f) for f in self._flavors.values()]
                 free_slots = 0
                 used = 0
@@ -1774,9 +1961,23 @@ class ScoopTools:
         product_id: str,
         flavor_ids: List[str],
     ) -> Dict[str, Any]:
+        # Keep the active product in sync so subsequent detail refreshes target the same item
+        self._active_product_id = product_id
         product = self._products.get(product_id)
         if not product:
             return {"error": "Unknown product"}
+
+        if not self._product_allows_flavors(product):
+            agent_note = (
+                "Flavor selection is locked for this item. Offer toppings instead; toppings are charged."
+            )
+            return _sanitize_output(
+                {
+                    "status": "Flavor selection unavailable",
+                    "productId": product_id,
+                    "agentNote": agent_note,
+                }
+            )
 
         line = self._get_or_create_line_state(product)
 
@@ -1808,6 +2009,10 @@ class ScoopTools:
         flavor_summary["charge"] = extra_charge
         line["flavor_summary"] = flavor_summary
 
+        # Pull current toppings so the detail card stays fully populated
+        current_toppings = line.get("toppings", [])
+        topping_summary = line.get("topping_summary", {}) or {}
+
         # Update detail product overlay
         await self._publish_overlay_for_ctx(
             "products",
@@ -1819,6 +2024,11 @@ class ScoopTools:
                     for f in resolved_flavors
                 ],
                 "flavorSummary": _sanitize_output(flavor_summary),
+                "selectedToppings": [
+                    _sanitize_output(self._format_topping_card(t))
+                    for t in current_toppings
+                ],
+                "toppingSummary": _sanitize_output(topping_summary) if topping_summary else None,
             },
         )
 
@@ -1846,6 +2056,7 @@ class ScoopTools:
         product_id: str,
         topping_ids: List[str],
     ) -> Dict[str, Any]:
+        self._active_product_id = product_id
         product = self._products.get(product_id)
         if not product:
             return {"error": "Unknown product"}
@@ -1884,6 +2095,9 @@ class ScoopTools:
         topping_summary["charge"] = extra_charge
         line["topping_summary"] = topping_summary
 
+        current_flavors = line.get("flavors", [])
+        flavor_summary = line.get("flavor_summary", {}) or {}
+
         await self._publish_overlay_for_ctx(
             "products",
             {
@@ -1894,6 +2108,11 @@ class ScoopTools:
                     for t in resolved_toppings
                 ],
                 "toppingSummary": _sanitize_output(topping_summary),
+                "selectedFlavors": [
+                    _sanitize_output(self._format_flavor_card(f))
+                    for f in current_flavors
+                ],
+                "flavorSummary": _sanitize_output(flavor_summary) if flavor_summary else None,
             },
         )
 
