@@ -1,60 +1,34 @@
 # Icecream Kiosk AI Avatar
 
-Modern, LiveKit‑powered kiosk experience that pairs a Python realtime
-agent (with an Anam avatar) and a Next.js frontend. The agent owns a
-local knowledge base, handles conversational logic, and drives the UI
-through LiveKit RPCs; the browser renders the avatar stream, product
-cards, and pickup guidance.
+LiveKit-driven kiosk that pairs a Python avatar worker (Anam persona with Deepgram STT, Silero VAD, Google Gemini LLM, and Cartesia TTS) with a Next.js frontend. The agent owns the menu/pickup knowledge base, orchestrates UI state via RPC, and the browser renders the avatar stream plus product and pickup cards.
 
 ---
 
-## Architecture at a glance
+## Architecture
 
 ```
-                           ┌────────────────────────┐
-                           │      OpenAI Realtime   │
-                           │        (LLM + TTS)     │
-                           └──────────┬─────────────┘
-                                      │
-┌────────────┐    audio/video   ┌─────▼─────┐   RPC / data   ┌──────────────┐
-│  Browser   │◄────────────────►│ LiveKit   │◄──────────────►│ Python Agent │
-│ (Next.js)  │   + RPC handler   │   Cloud   │   overlay data │  (agents/)   │
-└────┬───────┘                   └─────▲─────┘                └────┬─────────┘
-     │ UI state / inputs               │ Room media                   │ Tools
-     │                                 │                               │
-┌────▼─────────────────────────────────┴────────────┐         ┌────────▼────────┐
-│  ProductShowcase (RPC) + OverlayLayer (data)       │         │ SCOOP_KB        │
-│  mic controls, room join, avatar renderer          │         │ (products +     │
-│                                                    │         │  directions)    │
-└────────────────────────────────────────────────────┘         └────────────────┘
+Browser (Next.js 15)
+  - joins LiveKit room, renders avatar, registers RPC handlers
+  - data overlays for legacy fallback
+          ▲                     │
+          │ media/data (LiveKit)│
+          │                     ▼
+Python worker (agents/avatar_anam.py)
+  - Deepgram STT + Silero VAD
+  - Google Gemini LLM (tools enabled)
+  - Cartesia TTS
+  - Anam avatar stream
+  - RPC + overlays: menu, flavors, toppings, cart, directions
 ```
-
-### Key flows
-
-1. **Room join** – Frontend obtains a LiveKit token (from Cloud or your
-   own token service) and joins `kiosk-room`.
-2. **Avatar session** – The Python worker connects, launches the Anam
-   avatar, and starts the realtime OpenAI session.
-3. **Conversation** – Agent uses the local knowledge base + tools to
-   service guests. Menu queries → `client.products` RPC (`menu` / `detail`),
-   cart updates → `client.products` (`added`), pickup guidance →
-   `client.directions`.
-4. **Frontend render** – ProductShowcase reacts to RPC payloads (grid,
-   detail card, toast, directions). OverlayLayer still listens to the
-   legacy data topic for backwards compatibility.
 
 ---
 
 ## Repository layout
 
 ```
-agents/     # Python LiveKit worker, Anam avatar session, knowledge base
-frontend/   # Next.js 15 UI that joins LiveKit and renders RPC-driven cards
+agents/     # Python LiveKit worker, knowledge base, Anam avatar pipeline
+frontend/   # Next.js 15 UI that joins LiveKit and reacts to RPC + overlays
 ```
-
-> The original FastAPI token service (`backend_py/`) is no longer part of
-> the active build. Provide your own token API or issue tokens via LiveKit
-> Cloud when running locally.
 
 ---
 
@@ -62,10 +36,10 @@ frontend/   # Next.js 15 UI that joins LiveKit and renders RPC-driven cards
 
 | Component | Requirement |
 | --- | --- |
-| Agent | Python 3.11+ (tested with 3.13), LiveKit Cloud project, Anam credentials, OpenAI realtime API key |
-| Frontend | Node 20+ / npm 10+, LiveKit token service |
+| Agent | Python 3.11+, LiveKit Cloud project, Anam credentials, Deepgram/Google/Cartesia API keys |
+| Frontend | Node 20+ / npm 10+, LiveKit token credentials |
 
-Optional: Docker for containerizing the worker.
+Optional: Docker to containerize the worker.
 
 ---
 
@@ -80,24 +54,28 @@ Optional: Docker for containerizing the worker.
    pip install -r requirements.txt
    ```
 
-2. **Create `.env`**
+2. **Environment**
+
+   Create `agents/.env` (do not commit secrets):
 
    ```
    LIVEKIT_URL=wss://<your-project>.livekit.cloud
    LIVEKIT_API_KEY=lk_...
    LIVEKIT_API_SECRET=...
    LIVEKIT_AGENT_NAME=baskin-avatar
+   LIVEKIT_AGENT_IDENTITY_PREFIX=baskin-avatar
 
-   OPENAI_API_KEY=...
-   OPENAI_REALTIME_MODEL=gpt-realtime-mini-2025-10-06
-   OPENAI_REALTIME_VOICE=coral
+   GOOGLE_API_KEY=...
+   GOOGLE_MODEL=gemini-2.5-flash-lite
+   DEEPGRAM_API_KEY=...
+   CARTESIA_API_KEY=...
+   CARTESIA_VOICE_ID=829ccd10-f8b3-43cd-b8a0-4aeaa81f3b30
 
    ANAM_API_KEY=...
    ANAM_AVATAR_ID=...
    ```
 
-   *No external webhooks are required – the worker ships with `SCOOP_KB`
-   (menu + pickup directions).*
+   The worker ships with an embedded knowledge base (`SCOOP_KB`) for menu items, toppings, and pickup locations—no external webhooks or DB calls.
 
 3. **Run the worker**
 
@@ -105,8 +83,7 @@ Optional: Docker for containerizing the worker.
    python avatar_anam.py start
    ```
 
-   Logs display tool execution, overlay dispatch, and RPC targets:
-   `Dispatched RPC client.products to guest-xxxx ...`.
+   Watch for logs like `client.menuLoaded`, `client.cartUpdated`, and `client.directions` to confirm UI payloads are being dispatched.
 
 4. **Docker (optional)**
 
@@ -115,14 +92,16 @@ Optional: Docker for containerizing the worker.
    docker run --rm --env-file agents/.env scoop-agent:latest
    ```
 
-### RPC & overlay topics
+### RPC and overlay topics
 
-| Topic | Direction | Payload | Purpose |
+| Direction | Method / Topic | Payload highlight | Purpose |
 | --- | --- | --- | --- |
-| `client.products` | Agent → frontend | `{ action: "menu" \| "detail" \| "added", ... }` | Drives product grid, detail, toast |
-| `client.directions` | Agent → frontend | `{ action: "show" \| "clear", directions: [...] }` | Renders pickup card |
-| `agent.addToCart` | Frontend → agent | `{ productId, qty }` | Allows UI button to add via tool |
-| `ui.overlay` | Agent → frontend data channel | Legacy overlay JSON (products/cart/directions) |
+| Agent → Frontend (RPC) | `client.menuLoaded` | `{ view: "grid"|"detail", category, productId? }` | Drives product grid/detail state |
+| Agent → Frontend (RPC) | `client.flavorsLoaded` / `client.toppingsLoaded` | `{ productId, count }` | Opens flavor/topping pickers |
+| Agent → Frontend (RPC) | `client.cartUpdated` | `{ cart: { items, subTotalAED, taxAED, totalAED } }` | Syncs cart and totals (VAT included) |
+| Agent → Frontend (RPC) | `client.directions` | `{ action: "show", locations: [...] }` | Shows pickup guidance card |
+| Frontend → Agent (RPC) | `agent.addToCart` | `{ productId, qty }` | UI button to invoke `add_to_cart` tool |
+| Data channel fallback | Topic `ui.overlay` | `kind: products|flavors|toppings|cart|directions` | Legacy/backup UI overlay stream |
 
 ---
 
@@ -137,14 +116,20 @@ Optional: Docker for containerizing the worker.
 
 2. **Environment**
 
-   Create `.env.local` if you need to override defaults:
+   Create `.env.local` with LiveKit creds (used by the built-in token API):
 
    ```
-   NEXT_PUBLIC_LIVEKIT_URL=wss://<your-project>.livekit.cloud
-   NEXT_PUBLIC_TOKEN_ENDPOINT=https://<your-token-service>/api/livekit/token
-   ```
+   LIVEKIT_URL=wss://<your-project>.livekit.cloud
+   LIVEKIT_API_KEY=lk_...
+   LIVEKIT_API_SECRET=...
 
-   Tokens may come from LiveKit Cloud (for development) or your own API.
+   NEXT_PUBLIC_AGENT_NAME=baskin-avatar
+   NEXT_PUBLIC_CONN_DETAILS_ENDPOINT=/api/livekit/connection-details
+   NEXT_PUBLIC_REQUEST_AGENT_ENDPOINT=/api/livekit/request-agent
+   NEXT_PUBLIC_LK_RECORD_ENDPOINT=/api/livekit/record
+   NEXT_PUBLIC_SHOW_SETTINGS_MENU=false
+   NEXT_PUBLIC_VOICE_AGENT_IMAGE=/images/voice-agent-image.jpg
+   ```
 
 3. **Run the dev server**
 
@@ -152,31 +137,26 @@ Optional: Docker for containerizing the worker.
    npm run dev
    ```
 
-   Visit `http://localhost:3000` and click **Start Session**. The app
-   joins the room, renders the avatar track, registers RPC handlers, and
-   exposes a microphone toggle.
+   Open `http://localhost:3000`, tap **Start Session**, and confirm the avatar joins and RPC handlers fire.
 
 ### UI highlights
 
-- **ProductShowcase** (`frontend/app/rooms/[roomName]/ProductShowcase.tsx`)  
-  Handles `client.products` and `client.directions`, animates menu grid,
-  detail card, add-to-cart toast, and pickup card.
-
-- **OverlayLayer**  
-  Continues to display data-track overlays for backwards compatibility
-  with older agent payloads.
+- `frontend/app/rooms/[roomName]/ProductShowcase.tsx`  
+  Renders product grid/detail, add-to-cart toast, and pickup card from RPC payloads.
+- `frontend/app/rooms/[roomName]/OverlayLayer.tsx`  
+  Listens to both RPC and `ui.overlay` data to keep legacy overlays in sync.
 
 ---
 
 ## Development workflow
 
-1. **Agent** – reconnect after any knowledge-base or tool change:
+1. **Agent** – reconnect after prompt/tool/KB tweaks:
 
    ```bash
    python avatar_anam.py start
    ```
 
-2. **Frontend** – rebuild when editing components:
+2. **Frontend** – standard Next.js dev loop:
 
    ```bash
    npm run dev
@@ -194,52 +174,33 @@ Optional: Docker for containerizing the worker.
 
 4. **Git hygiene**
 
-   - Do **not** commit `.next/**` build artefacts – ensure they are ignored.
-   - Stage only source changes (`agents/`, `frontend/**/*.{ts,tsx,css}`, manifests).
+   - Keep secrets out of git (`agents/.env`, `secrets.env`).
+   - Ignore build artefacts (`frontend/.next/**`).
 
 ---
 
 ## Deploying the worker to LiveKit Cloud
 
-The repo ships with `agents/Dockerfile` and `agents/livekit.toml` configured for agent **CA_WBqzxRkUtMFh**. Publish updates with the LiveKit CLI:
+`agents/Dockerfile` and `agents/livekit.toml` target the avatar worker. Publish with the LiveKit CLI:
 
-1. Authenticate once
-   ```powershell
-   lk cloud auth
-   lk project set-default "avatars"
-   ```
-2. Deploy new code
-   ```powershell
-   cd agents
-   lk agent deploy
-   ```
-3. Rotate secrets when values change
-   ```powershell
-   lk agent update-secrets --id CA_WBqzxRkUtMFh --secrets-file secrets.env
-   ```
-4. Monitor status/logs
-   ```powershell
-   lk agent status --id CA_WBqzxRkUtMFh
-   lk agent logs   --id CA_WBqzxRkUtMFh
-   ```
+```powershell
+lk cloud auth
+lk project set-default "avatars"
+cd agents
+lk agent deploy
+lk agent update-secrets --id CA_WBqzxRkUtMFh --secrets-file .env
+lk agent status --id CA_WBqzxRkUtMFh
+lk agent logs --id CA_WBqzxRkUtMFh
+```
 
-`secrets.env` should mirror `agents/.env` but must remain untracked.
 
 ---
 
-## Deploying the frontend to Vercel
+## Deploying the frontend
 
-1. Configure environment variables in Vercel:
-   - `LIVEKIT_URL`
-   - `LIVEKIT_API_KEY`
-   - `LIVEKIT_API_SECRET`
-   - `NEXT_PUBLIC_AGENT_NAME=baskin-avatar`
-   - `NEXT_PUBLIC_CONN_DETAILS_ENDPOINT=/api/livekit/connection-details`
-   - `NEXT_PUBLIC_SHOW_SETTINGS_MENU=false`
-   - `NEXT_PUBLIC_LK_RECORD_ENDPOINT=/api/livekit/record`
-   - `NEXT_PUBLIC_VOICE_AGENT_IMAGE=/images/voice-agent-image.jpg`
-2. Build command: `npm install` then `npm run build` (Vercel defaults).
-3. After deploy, smoke test the hosted app: start a session, ensure the Scoop avatar joins, add an item, and request pickup directions.
+1. Add the LiveKit and `NEXT_PUBLIC_*` variables above to your host (e.g. Vercel).
+2. Build command: `npm install` then `npm run build`.
+3. Smoke test: start a room, see the avatar join, add an item, and request pickup directions.
 
 ---
 
@@ -247,36 +208,17 @@ The repo ships with `agents/Dockerfile` and `agents/livekit.toml` configured for
 
 | Symptom | Explanation / Fix |
 | --- | --- |
-| RPC logs show `room not ready` | Controller participant hasn’t joined yet. Open the frontend before speaking. |
-| Menu speech works but no cards render | Verify `client.products` RPC registration (check browser console). Ensure the worker logs `Dispatched RPC client.products…`. |
-| Add-to-cart button disabled | Browser hasn’t detected the agent participant – wait for the avatar to join or refresh. |
-| Directions card never appears | Ensure the agent calls `get_directions` after checkout flow; worker now emits `client.directions` that clears the product deck. |
-| LiveKit token errors | Confirm your token service scopes the participant to the correct room (default `kiosk-room`). |
-
----
-
-## Deploying / pushing to GitHub
-
-1. Clean up generated artefacts (`frontend/.next`, legacy backend files) to
-   avoid committing deletions you don’t intend.
-2. Run tests/lint as above.
-3. Stage and commit:
-
-   ```bash
-   git add agents/ frontend/ package-lock.json agents/requirements.txt
-   git commit -m "feat: scoop avatar kb + rpc showcase"
-   git push origin <branch>
-   ```
-
-4. Update GitHub secrets (LiveKit URL/key/secret, OpenAI, Anam) in your
-   deployment environment.
+| No cards or pickers | Check browser console for `client.menuLoaded` / `client.flavorsLoaded` / `client.toppingsLoaded` handlers and confirm the agent logs those RPCs. |
+| Add-to-cart button disabled | The UI has not seen the agent participant yet; wait for the avatar track or refresh. |
+| Pickup card never appears | Ensure the flow calls `get_directions`; the worker emits both `client.directions` and `ui.overlay` for fallback. |
+| Token errors | Verify the LiveKit credentials in `.env.local` and that tokens scope the correct room (default `kiosk-room`). |
 
 ---
 
 ## Reference
 
-- [LiveKit Realtime RPC docs](https://docs.livekit.io/home/client/data/rpc/)
 - [LiveKit Agents SDK](https://docs.livekit.io/agents/)
+- [LiveKit Realtime RPC](https://docs.livekit.io/home/client/data/rpc/)
 - [Anam Avatars](https://github.com/anam-ai/)
 
 Happy scooping!

@@ -1,14 +1,12 @@
 # Scoop Avatar Worker
 
-This worker drives the Scoop Haven kiosk avatar. It combines a local
-knowledge base, LiveKit realtime voice, and UI RPCs to guide guests
-through the menu, cart, and pickup flow.
+Python worker that drives the Scoop Haven kiosk avatar. It combines an embedded knowledge base with LiveKit realtime voice, orchestrates UI state through RPC, and streams legacy overlays for fallback.
 
 ## Prerequisites
 
 - Python 3.11+ (tested with 3.13)
 - LiveKit project and avatar credentials
-- OpenAI realtime API key
+- Deepgram, Google, Cartesia API keys
 - Anam replica credentials
 
 Install dependencies in an isolated environment:
@@ -21,47 +19,45 @@ pip install -r requirements.txt
 
 ## Environment
 
-Create `agents/.env` with the following variables:
+Create `agents/.env` with:
 
 | Variable | Description |
 | --- | --- |
-| `LIVEKIT_URL` | LiveKit host (e.g. `wss://your-host.livekit.cloud`) |
+| `LIVEKIT_URL` | LiveKit host (e.g. `wss://your-project.livekit.cloud`) |
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | API credentials with room access |
-| `LIVEKIT_AGENT_NAME` | Agent display name (defaults to `baskin-avatar`) |
-| `OPENAI_API_KEY` | Realtime API key |
-| `OPENAI_REALTIME_MODEL` | Realtime model id (defaults to `gpt-realtime-mini-2025-10-06`) |
-| `OPENAI_REALTIME_VOICE` | Voice id (`coral` by default) |
+| `LIVEKIT_AGENT_NAME` / `LIVEKIT_AGENT_IDENTITY_PREFIX` | Optional overrides for participant naming |
+| `GOOGLE_API_KEY` / `GOOGLE_MODEL` | Gemini LLM (defaults to `gemini-2.5-flash-lite`) |
+| `DEEPGRAM_API_KEY` | STT (nova-3) |
+| `CARTESIA_API_KEY` / `CARTESIA_VOICE_ID` | TTS (sonic-3, custom voice) |
 | `ANAM_API_KEY` / `ANAM_AVATAR_ID` | Anam replica credentials |
 
-No external webhooks are required—the menu and directions are baked
-into the worker’s knowledge base.
+The menu, toppings, flavors, and pickup displays are baked into `SCOOP_KB`; no external webhooks are used.
 
-## Architecture Snapshot
+## Architecture snapshot
 
 ```
-LiveKit Room
-├─ Scoop avatar (Anam video feed)
+LiveKit room
+├─ Avatar participant (Anam video feed)
 ├─ Controller participant (browser client)
 └─ Worker (this process)
    ├─ Knowledge base (SCOOP_KB)
-   ├─ livekit-agents realtime session
-   ├─ Tool suite (menu, cart, directions)
-   ├─ Data overlays (legacy compatibility)
-   └─ RPC publisher (client.products / client.directions / agent.addToCart)
+   ├─ AgentSession: Deepgram STT + Silero VAD + Google Gemini LLM + Cartesia TTS
+   ├─ Tools: list_menu, choose_flavors, choose_toppings, add_to_cart, get_directions
+   ├─ RPC publisher: client.menuLoaded / client.flavorsLoaded / client.toppingsLoaded / client.cartUpdated / client.directions
+   └─ Legacy overlay stream: topic `ui.overlay`
 ```
 
 ### Tool behaviour
 
-| Tool | Purpose | RPC emitted |
-| --- | --- | --- |
-| `list_icecream_flavors` | Menu search / recommendations | `client.products` (`menu` or `detail`) |
-| `add_to_cart` | Cart mutation | `client.products` (`added`) |
-| `get_directions` | Pickup details | `client.directions` (`show`) |
+| Tool | Purpose | RPC emitted | Overlay |
+| --- | --- | --- | --- |
+| `list_menu` | Menu grid/detail, flavor picker, toppings picker | `client.menuLoaded` / `client.flavorsLoaded` / `client.toppingsLoaded` | `products` / `flavors` / `toppings` |
+| `choose_flavors` | Attach flavors and compute free vs extra | — (detail overlay refresh) | `products` |
+| `choose_toppings` | Attach toppings and compute free vs extra | — (detail overlay refresh) | `products` |
+| `add_to_cart` | Add line with VAT + extras and cart totals | `client.cartUpdated` | `cart` |
+| `get_directions` | Pickup guidance | `client.directions` | `directions` |
 
-The client registers matching RPC handlers to render product cards,
-confirm add-to-cart events, and transition into the pickup card. If a
-client misses an RPC, the worker still publishes data overlays so the
-experience degrades gracefully.
+Incoming UI RPC: `agent.addToCart` invokes `add_to_cart` directly (used by the frontend button). If RPC delivery fails, the same payloads are streamed over `ui.overlay`.
 
 ## Running the worker
 
@@ -70,19 +66,16 @@ python agents/avatar_anam.py start
 ```
 
 The worker:
-
 1. Connects to LiveKit and waits for the controller participant.
-2. Starts the Anam avatar session and the realtime voice session.
-3. Serves menu/cart/directions via the knowledge base + tools.
-4. Streams overlays and UI RPC payloads to the frontend.
+2. Starts the Anam avatar session and the realtime voice pipeline.
+3. Serves menu/cart/directions from `SCOOP_KB` via the tools above.
+4. Streams overlays and RPC payloads to the frontend.
 
-Logs include RPC dispatch details so you can verify menu/detail/added
-events are reaching the client (`Dispatched RPC client.products ...`).
+Logs include `client.menuLoaded`, `client.cartUpdated`, and `client.directions` for easy verification.
 
 ## Frontend pairing
 
-The Next.js app in `frontend/` consumes the RPC payloads via the new
-`ProductShowcase` component. Start it with:
+The Next.js app in `frontend/` consumes both RPC and overlay payloads. Start it with:
 
 ```bash
 cd frontend
@@ -90,25 +83,36 @@ npm install
 npm run dev
 ```
 
-Make sure the frontend uses the same room name and LiveKit credentials
-as the worker.
+Ensure the frontend uses the same LiveKit project and room name as the worker.
 
-## Preparing to push to GitHub
+## Preparing to push
 
 1. **Lint / build**  
    - `python -m compileall agents/avatar_anam.py`  
-   - `npm run lint` (from `frontend/`)
+   - `npm run lint --workspace frontend`
 
 2. **Review git status**  
-   The repo currently has tracked build artefacts (`frontend/.next/**`)
-   marked for deletion. Clean or regenerate as needed before committing.
+   Keep secrets untracked and avoid committing `frontend/.next/**`.
 
-3. **Commit and push**  
+3. **Commit**  
    ```bash
    git add agents/ frontend/ package-lock.json agents/requirements.txt
-   git status            # confirm staged files
+   git status
    git commit -m "feat: scoop avatar kb + rpc product showcase"
-   git push origin <branch>
    ```
 
-Update the branch name as appropriate for your workflow.
+## LiveKit Cloud deployment
+
+`agents/livekit.toml` targets agent `CA_WBqzxRkUtMFh`. Typical flow:
+
+```powershell
+lk cloud auth
+lk project set-default "avatars"
+cd agents
+lk agent deploy
+lk agent update-secrets --id CA_WBqzxRkUtMFh --secrets-file secrets.env
+lk agent status --id CA_WBqzxRkUtMFh
+lk agent logs --id CA_WBqzxRkUtMFh
+```
+
+`secrets.env` should mirror `agents/.env` but stay out of git.
