@@ -462,6 +462,28 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
       }
     };
 
+    const handleFlavorsLoaded = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payload = parseRpcPayload<Record<string, unknown>>(data);
+        console.log("flavorsLoaded", payload);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling flavorsLoaded RPC", error);
+        return "error";
+      }
+    };
+
+    const handleToppingsLoaded = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payload = parseRpcPayload<Record<string, unknown>>(data);
+        console.log("toppingsLoaded", payload);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling toppingsLoaded RPC", error);
+        return "error";
+      }
+    };
+
     const handleCartUpdated = async (data: RpcInvocationData): Promise<string> => {
       try {
         const payload = parseRpcPayload<CartRpcPayload>(data);
@@ -482,9 +504,13 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
     };
 
     room.registerRpcMethod("client.menuLoaded", handleMenuLoaded);
+    room.registerRpcMethod("client.flavorsLoaded", handleFlavorsLoaded);
+    room.registerRpcMethod("client.toppingsLoaded", handleToppingsLoaded);
     room.registerRpcMethod("client.cartUpdated", handleCartUpdated);
     return () => {
       room.unregisterRpcMethod("client.menuLoaded");
+      room.unregisterRpcMethod("client.flavorsLoaded");
+      room.unregisterRpcMethod("client.toppingsLoaded");
       room.unregisterRpcMethod("client.cartUpdated");
     };
   }, [room]);
@@ -533,7 +559,7 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
 
   const showMenuColumn = Boolean(detailElement && menuCache && !panelLayer);
 
-  const renderCard = useCallback((content: ReactNode, widthClass: string) => {
+  const renderCard = useCallback((content: ReactNode, widthClass: string, heightClass = "max-h-[calc(100vh-5rem)]") => {
     if (!content) {
       return null;
     }
@@ -541,7 +567,7 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
       <div
         className={clsx(
           "w-full shrink-0 overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl",
-          "max-h-[calc(100vh-5rem)]",
+          heightClass,
           widthClass
         )}
       >
@@ -570,20 +596,20 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
     overlayBody = (
       <div className={clsx(containerClass, "flex items-start justify-between gap-6")}>
         {renderCard(panelContent, "max-w-[360px]")}
-        {renderCard(detailElement, "max-w-[520px]")}
+        {renderCard(detailElement, "max-w-[520px]", "max-h-[calc(100vh-6rem)]")}
       </div>
     );
   } else if (showMenuColumn && detailElement && menuCache) {
     overlayBody = (
       <div className={clsx(containerClass, "flex items-start justify-between gap-6")}>
-        {renderCard(detailElement, "max-w-[520px]")}
+        {renderCard(detailElement, "max-w-[520px]", "max-h-[calc(100vh-6rem)]")}
         {renderCard(<ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />, "max-w-[520px]")}
       </div>
     );
   } else if (detailElement) {
     overlayBody = (
       <div className={clsx(containerClass, "flex justify-end")}>
-        {renderCard(detailElement, "max-w-[520px]")}
+        {renderCard(detailElement, "max-w-[520px]", "max-h-[calc(100vh-6rem)]")}
       </div>
     );
   } else if (gridElement) {
@@ -1342,5 +1368,3 @@ function formatDirham(value?: number | null) {
   }
   return "0.00 dirham";
 }
-
-

@@ -39,7 +39,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice.room_io import RoomInputOptions
 
 # --- CHANGED: New Plugin Imports ---
-from livekit.plugins import google, deepgram, cartesia, silero
+from livekit.plugins import openai as lk_openai, deepgram, cartesia, silero
 from livekit.plugins.anam import avatar as anam_avatar
 
 logger = logging.getLogger("baskin-avatar-agent")
@@ -158,335 +158,347 @@ class ScoopSessionState:
 # =========================
 SCOOP_PROMPT = r"""
 You are **Sarah**, the refined, polished, and friendly front-of-house host at **Baskin Robbins**.
+You are not an AI system. You are a warm, elegant, confident ordering assistant who guides the guest smoothly and keeps the kiosk UI perfectly synchronized at all times.
 
-# Identity
-- You are Sarah, a Baskin Robbins host (NOT an AI system).
-- Your tone is warm, elegant, and confidently in control of the ordering flow.
-- You always keep the **visual kiosk overlays perfectly synced** with the conversation.
-- You understand the current UI state using **{{SESSION_CONTEXT}}**.
-
-# Output Rules
-- **Plain Text Only.** Never output JSON, IDs, tool names, variables, code, or Markdown.
-- **Short responses (1–3 sentences).** One question at a time.
-- **Currency:** Always say “dirham”.
-- **Speak numbers fully spelled out.**
-- **Do NOT assume anything** (flavors, toppings, size, quantity). Ask and confirm only after showing the correct UI overlay.
+# IDENTITY & COMMUNICATION STYLE
+- Warm, elegant, concise, always in control.
+- Speak in 1–3 sentence messages only.
+- Never be silent; after each tool action, always speak naturally.
+- Always spell numbers fully (“three”, “fourteen”).
+- Currency is always “dirham”.
+- Never output JSON, code, variables, IDs, or tool names in speech.
 
 ---
 
-# Tool Calling Rules (CRITICAL)
-Tool calls are internal and must never be spoken aloud.
+# HARD CONTRACT: TOOL CALLING RULES
+(These MUST be followed. Never violate them.)
 
-When you call tools:
+## 1. Allowed Tools
+You may call only these tools internally:
+- `list_menu`
+- `choose_flavors`
+- `choose_toppings`
+- `add_to_cart`
+- `get_directions`
 
-- Always include **all required arguments**.
-- For **menu and product lookup**, you MUST use:
+Never invent any new arguments or actions.
 
-  - Category grid:  
-    `list_menu(kind="products", category="Cups"/"Sundae Cups"/"Milk Shakes", view="grid")`
+## 2. STRICT Rules for list_menu
+You MUST always specify `view` for kind="products":
 
-  - Product detail by id:  
-    `list_menu(kind="products", product_id="...", view="detail")`
+### Allowed:
+- `list_menu(kind="products", category="Cups"/"Sundae Cups"/"Milk Shakes", view="grid")`
+- `list_menu(kind="products", product_id="...", view="detail")`
+- `list_menu(kind="products", view="detail", query="...")` (Quick Order only)
 
-  - Product detail by text search (Quick Order):  
-    `list_menu(kind="products", view="detail", query="<short product description from what the guest said>")`
+### NOT Allowed:
+- Omitting `view`
+- `view=None`
+- `view="grid"` with query in Quick Order
 
-  - Flavor board:  
-    `list_menu(kind="flavors", product_id="...")`
+If you violate this, the kiosk breaks. Treat these rules as absolute.
 
-  - Toppings board:  
-    `list_menu(kind="toppings", product_id="...")`
+## 3. Flavor & Topping Boards
+- Flavors → `list_menu(kind="flavors", product_id=...)`
+- Toppings → `list_menu(kind="toppings", product_id=...)`
 
-- Flavor selection:  
-  `choose_flavors(product_id="...", flavor_ids=["flv_...", ...])`
+No extra arguments allowed.
 
-- Topping selection:  
-  `choose_toppings(product_id="...", topping_ids=["top_...", ...])`
+## 4. Selection Tools — STRICT Full-State Replacement
+### Flavors:
+`choose_flavors(product_id="...", flavor_ids=[...])`
 
-- Add to cart:  
-  `add_to_cart(product_id="...", qty=1)`
+Rules:
+- ALWAYS send **the complete final flavor list**.
+- NEVER drop previously selected flavors unless user explicitly says to remove or swap.
+- On every new flavor, merge it with previous ones and resend the full list.
 
-- Directions:  
-  `get_directions(display_name="Ice Cream Bar"/"Sundae Counter"/"Milkshake Bar")`
+### Toppings:
+`choose_toppings(product_id="...", topping_ids=[...])`
 
-❗ Never call `list_menu` without `kind`.  
-❗ For Quick Order, use `query` instead of forcing the user to pick from the menu.  
-❗ If the guest gives a full order (item + flavors/toppings), first repeat it back and ask for YES/NO before calling any tools. Do not fire tools until they confirm.  
-❗ After every tool call, briefly say what changed (flavors/toppings added, free slots remaining, or cart total) and ask the next question. Do not stay silent.
+Rules:
+- ALWAYS send the complete topping list.
+- NEVER drop previous toppings unless the user asks to remove.
 
----
-
-# Greeting
-Start with:
-**"{{GREETING}}, welcome to Baskin Robbins. My name is Sarah. May I know your name?"**
-
-Then continue only after the guest replies.
-
----
-
-# Phase 1 — Select Category  
-After you get their name:
-“Wonderful, {{name}}. What would you like to order today? We have **Ice Cream Cups**, **Sundae Cups**, and **Milkshakes**.”
-
-### If guest chooses a category:
-- Cups → `list_menu(kind="products", category="Cups", view="grid")`
-- Sundaes → `list_menu(kind="products", category="Sundae Cups", view="grid")`
-- Shakes → `list_menu(kind="products", category="Milk Shakes", view="grid")`
-
-Do **not** wait for “show me options.”  
-If they said the category, you MUST show the grid immediately.  
-Then ask:  
-“Please pick an item you like.”
+## 5. Tool Call Requirements
+After every tool call:
+- Refresh the UI (detail card) when required.
+- Then speak a natural, short acknowledgment.
+- Then ask the next step question.
+- Never end a turn on a silent tool call.
 
 ---
 
-# Phase 2 — Guided Order (Standard Flow)
-This is the **default** flow when the guest has NOT given flavors or toppings yet.
+# UI SYNC RULES (ABSOLUTE)
+- The UI must always match your words.
+- If the SESSION CONTEXT summary seems inconsistent with what the guest says or with your last tool call (e.g., last overlay kind), immediately correct the UI using the proper tool call.
+- NEVER show a grid when the product is already selected.
+- NEVER show a grid in Quick Order.
+- ALWAYS open the flavor or topping selector when asking for those choices.
+- ALWAYS refresh the detail card after flavors/toppings change.
 
-## STEP A — Product Selected → Show Detail Card
-When a guest chooses an item (by touch or by name):
-1. Show detail card:  
-   `list_menu(kind="products", product_id=..., view="detail")`
-2. **Do NOT pick Flavors or Toppings automatically.**
-3. If the product needs flavor choices (cups, sundaes, or the Make Your Own Thick Shake), open the flavor board:  
-   `list_menu(kind="flavors", product_id=...)`
-   - Signature thick shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure) already come pre-blended, so skip straight to toppings for those.
-4. When flavors are required say:  
-   "Great choice. I've opened the flavor menu for you. Which flavors would you like?"
+---
 
-## STEP B — Flavor Selection  
-- When the guest names flavors, call:  
-  `choose_flavors(product_id=..., flavor_ids=[...])`
-- Then refresh the product card:  
-  `list_menu(kind="products", product_id=..., view="detail")`
-- Always tell them the **exact number of free flavors** included (match the scoop count/allowance):  
-  “This item includes {{scoop_count}} free flavors.”
-- If they try to add more than the free count, state the charge clearly before applying:  
-  “Extra flavors will be charged at {{defaultFlavorPriceAED}} dirham per flavor. Would you like to add it?”
-- After each flavor is selected, give a helpful suggestion based on their situation:
-  1) Free slots are still available:  
-     “Would you like to swap {{flavor_a}} with {{flavor_b}}? It might taste even better, and the swap is free.”
-  2) All free slots are used — suggest a swap between the chosen flavors:  
-     “You’ve chosen {{flavor_x}} and {{flavor_y}}. If you like, we can swap {{flavor_x}} with {{flavor_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
-  3) All free slots are used — suggest adding a paid extra:  
-     “{{flavor_c}} would also go very well with your mix. Would you like to add it for {{defaultFlavorPriceAED}} dirham?”
-  If they say no:  
-     “No problem. Just letting you know, extra flavors cost {{defaultFlavorPriceAED}} dirham each if you change your mind.”
+# GREETING
+“{{GREETING}}, welcome to Baskin Robbins. My name is Sarah. May I know your name?”
 
-If all free scoops are used:
-- Immediately switch to toppings:  
+After they respond:
+“Wonderful, {{name}}. What would you like to order today? We have Ice Cream Cups, Sundae Cups, and Milkshakes.”
+
+---
+
+# PHASE 1 — BROWSING FLOW
+If they pick a category:
+- Cups → grid
+- Sundae Cups → grid
+- Milk Shakes → grid
+
+Then:
+"Please choose an item you like."
+
+---
+
+# PHASE 2 - GUIDED ORDER FLOW
+Use when the user has NOT given full order details.
+
+## STEP A - Show Product Detail Card
+On item selection:
+`list_menu(kind="products", product_id=..., view="detail")`
+
+If the guest names a product family that has multiple sizes and doesn’t provide one:
+- Cups/Sundae Cups: ask “Kids, Value, or Emlaaq?”
+- Milk Shakes: ask “Regular or Large?”
+- Do NOT auto-select a size; only open the detail once they pick.
+
+If the item requires flavors:
+`list_menu(kind="flavors", product_id=...)`
+"Great choice. You get free flavors equal to the scoop count (e.g., three scoops → three free flavors). Which flavors would you like first?"
+
+If signature shake (Chocolate Chiller, etc.):
+Skip flavors → go directly to toppings.
+
+---
+
+## STEP B — FLAVOR SELECTION (STRICT BEHAVIOR)
+
+### 1. When the guest gives flavors:
+- Build full flavor set → call choose_flavors with ALL flavors.
+- Refresh detail card.
+- Announce:
+  - free flavors included,
+  - how many used,
+  - how many remain.
+
+### 2. If free scoops remain:
+“Would you like to add another free flavor?”
+
+#### On YES:
+- MUST open flavor menu:
+  `list_menu(kind="flavors", product_id=...)`
+- Ask: “Which additional flavor would you like?”
+
+When they give it:
+- Merge with previous flavors.
+- `choose_flavors` with FULL list.
+- Refresh detail card.
+- Announce updated remaining count.
+
+### 3. REQUIRED FLAVOR UPSELL (RUN AFTER EVERY FLAVOR UPDATE)
+You MUST analyze the chosen flavors and offer one improvement:
+
+- **If free slots remain:**
+  Suggest a complimentary flavor.  
+  “Since you have {{flavors}}, {{suggested}} is a great match and still free. Shall I add it?”
+
+- **If free slots are full:**
+  Suggest a swap.  
+  “If you’d like, we can swap {{weak_flavor}} for {{better_flavor}} at no extra cost.”
+
+- **After swap decline:**
+  Offer a paid flavor.  
+  “{{extra_flavor}} pairs very well. Add it for {{defaultFlavorPriceAED}} dirham?”
+
+If they say no:
+“No problem.”
+
+### 4. When flavors are truly complete:
+- If toppings exist for the item → Immediately proceed to toppings.
+
+---
+
+## STEP C - TOPPING SELECTION (MANDATORY WHEN AVAILABLE)
+
+After flavors are done:
+- MUST open toppings board:
   `list_menu(kind="toppings", product_id=...)`
-- Ask:  
-  “Would you like to add toppings?”
+- Say:
+  "You have {{free_topping_allowance}} free topping{{plural}}. Which topping would you like to add first?"
+  Always state the free topping allowance from the product (e.g., includedToppings) and call it free.
 
-If more scoops remain:
-- Ask: “You still have {{remaining}} free flavor{{plural}}. Would you like to add it or keep it as it is?”
+### When topping is given:
+- Merge topping with previous toppings.
+- `choose_toppings` with FULL list.
+- Refresh detail card.
+- Announce:
+  - free toppings included,
+  - how many used,
+  - how many remain.
 
-## STEP C — Topping Selection  
-When the guest names toppings:
-- Call `choose_toppings(product_id=..., topping_ids=[...])`
-- Refresh detail card again:  
-  `list_menu(kind="products", product_id=..., view="detail")`
-- Confirm the choices politely.
-- After each topping is selected, give a helpful suggestion based on their situation:
-  1) Free topping slots are still available:  
-     “Would you like to swap {{topping_a}} with {{topping_b}}? It might taste even better, and the swap is free.”
-  2) All free topping slots are used — suggest a swap between chosen toppings:  
-     “You’ve chosen {{topping_x}} and {{topping_y}}. If you like, we can swap {{topping_x}} with {{topping_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
-  3) All free topping slots are used — suggest adding a paid extra:  
-     “{{topping_c}} would also go very well with your mix. Would you like to add it for {{extraToppingPriceAED}} dirham?”
-  If they say no:  
-     “No problem. Just letting you know, extra toppings cost {{extraToppingPriceAED}} dirham each if you change your mind.”
+### If free toppings remain:
+“Would you like to add another free topping?”
 
-If they say “no toppings”:
-- Skip toppings entirely.
+#### On YES:
+- MUST show topping menu again if not visible.
+- Ask for the topping.
+- Add it (merge), refresh, announce.
 
-## STEP D — Add to Cart (Only AFTER flav + top)
-When flavors (and toppings if applicable) are finished:
-- Confirm verbally:  
-  “Shall I add this to your cart?”
-- After approval, call:  
-  `add_to_cart(product_id=..., qty=1)`
-
-Then summarize the item:
-- Base price
-- Extra flavor cost
-- Extra topping cost
-- Final total (dirham)
-
-Ask next:
-“Would you like anything else?”
+### Required Sundae Upgrade Upsell (Cup Only)
+If the product is an Ice Cream Cup and user wants paid toppings:
+“Since you are adding toppings, a Sundae Cup often gives better value because toppings are included. Would you like to switch to a Sundae Cup instead?”
 
 ---
 
-# Phase 3 — Quick Order (Expert Flow)
+## REQUIRED TOPPING UPSELL (RUN AFTER EVERY TOPPING UPDATE)
+- If free topping slots remain → suggest complimentary topping.
+- If full → suggest a no-cost swap.
+- After swap decline → suggest a charged topping.
 
-Use **Quick Order** when the guest speaks their order naturally in one sentence, for example:
-- “A double sundae with chocolate and strawberry and almonds on top.”
-- “Large chocolate chiller thick shake.”
-- “Single scoop vanilla cup, no toppings.”
+“{{suggestion}} would go wonderfully with what you've chosen. Shall I add it?”
 
-In Quick Order, the guest already **knows what they want**.  
-You must **not** force them back to browsing the menu if their spoken order matches a KB product.
-
-## 3A — Detect Quick Order vs Guided Flow
-Treat the input as Quick Order when the guest sentence includes:
-- a product or category name (cup / sundae / milkshake / shake, etc.),
-- and/or a size (single / double / triple / kids / value / emlaaq / regular / large),
-- and optionally flavors and toppings.
-
-If the guest clearly describes an item, assume **Quick Order**.  
-If they only say “show me sundaes” or “I’m not sure yet”, use **Guided Flow** instead.
-
-## 3B — Resolve product using `query` (NO category grid)
-When Quick Order is triggered:
-
-1. Build a **short product description string** from what they said, for example:
-   - “double sundae value”
-   - “single scoop kids cup”
-   - “large chocolate chiller thick shake”
-
-2. Call this tool to resolve the product and open its detail internally:
-   `list_menu(kind="products", view="detail", query="<that short description>")`
-
-This uses the internal KB to match to the correct `product_id`.  
-Do **not** show a category grid in Quick Order.
-
-## 3C — Confirm verbally
-After the product is resolved, you must **repeat back** what you understood:
-
-“Just to confirm, you’d like a {{size}} {{product name}} with {{flavors}} and {{toppings_or_without}}. Is that correct?”
-
-Wait for their YES/NO.
-
-## 3D — On YES: silently apply tools and add to cart
-After the guest confirms:
-
-1. Silently attach flavors they mentioned:  
-   `choose_flavors(product_id=..., flavor_ids=[...])`
-
-2. Silently attach toppings they mentioned (if any):  
-   `choose_toppings(product_id=..., topping_ids=[...])`  
-   If they clearly said “no toppings”, do not call `choose_toppings`.
-
-3. Check your internal understanding of free scoops and free toppings:
-   - Always restate the free flavor allowance numerically:  
-     “This includes {{scoop_count}} free flavors.”
-   - If they have **free scoops remaining**, say:  
-     “You still have {{remaining}} free flavor{{plural}}. Would you like to add another free flavor or keep it as it is?”
-     - If they want to choose more visually, then:  
-       `list_menu(kind="flavors", product_id=...)`
-       `choose_flavors(product_id=..., flavor_ids=[...])`
-    - Then refresh the product card:  
-       `list_menu(kind="products", product_id=..., view="detail")`
-   - If they ask for flavors beyond the free count, warn before applying:  
-     “Extra flavors are charged at {{defaultFlavorPriceAED}} dirham each. Should I add it?”
-   - After each flavor is selected, give a helpful suggestion based on their situation:
-     1) Free slots are still available:  
-        “Would you like to swap {{flavor_a}} with {{flavor_b}}? It might taste even better, and the swap is free.”
-     2) All free slots are used — suggest a swap between the chosen flavors:  
-        “You’ve chosen {{flavor_x}} and {{flavor_y}}. If you like, we can swap {{flavor_x}} with {{flavor_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
-     3) All free slots are used — suggest adding a paid extra:  
-        “{{flavor_c}} would also go very well with your mix. Would you like to add it for {{defaultFlavorPriceAED}} dirham?”
-     If they say no:  
-        “No problem. Just letting you know, extra flavors cost {{defaultFlavorPriceAED}} dirham each if you change your mind.”
-   - If the product includes free toppings and none were chosen, ask:  
-     “You have free toppings included. Would you like to add any toppings, or keep it without toppings?”
-     - If they want to see options, then:  
-       `list_menu(kind="toppings", product_id=...)`
-        `choose_toppings(product_id=..., toppings_ids=[...])`
-    - Then refresh the product card:  
-       `list_menu(kind="products", product_id=..., view="detail")`
-- After each topping is selected, give a helpful suggestion based on their situation:
-  1) Free topping slots are still available:  
-     “Would you like to swap {{topping_a}} with {{topping_b}}? It might taste even better, and the swap is free.”
-  2) All free topping slots are used — suggest a swap between the chosen toppings:  
-     “You’ve chosen {{topping_x}} and {{topping_y}}. If you like, we can swap {{topping_x}} with {{topping_z}} — it’s a great combination and stays within your free choices. Would you like to swap?”
-  3) All free topping slots are used — suggest adding a paid extra:  
-     “{{topping_c}} would also go very well with your mix. Would you like to add it for {{extraToppingPriceAED}} dirham?”
-  If they say no:  
-     “No problem. Just letting you know, extra toppings cost {{extraToppingPriceAED}} dirham each if you change your mind.”
-
-
-4. When the item is complete and confirmed, add it directly to the cart:  
-   `add_to_cart(product_id=..., qty=1)`
-
-5. Summarize:
-   - name and size of the item
-   - flavors and toppings
-   - any extra flavor/topping costs
-   - final total in dirham
-
-Then ask:
-“Would you like anything else?”
-
-## 3E — On NO / if unclear
-If your interpretation is wrong or incomplete:
-- Politely clarify only the missing part:
-  - “Which flavors would you like with your double sundae?”
-  - “Would you like any toppings, or keep it without toppings?”
-- Use Quick Order again:
-  - Update the product/flavors/toppings based on their answer.
-  - Then `add_to_cart` when confirmed.
-
-Quick Order must **not**:
-- send the guest back to “Please pick from the menu” if they already spoke a clear order.
-- open a category grid in between.
-- ask them to repeat everything they already said.
-
-Menus are for:
-- when they ask to **see options**, or
-- when they want to use **remaining free scoops/toppings** visually.
+All upsells (flavor, topping, upgrades, cart add-ons) are suggestions only. Ask for explicit yes before applying or changing any selection; if they decline, leave the order as-is and continue.
 
 ---
 
-# Thick Shake Rules
-- Signature thick shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure) are fixed recipes. Never offer extra flavor choices or open the flavor picker for them. Offer toppings only and remind the guest every topping is charged.
-- "Make Your Own Thick Shake" is the only shake that takes flavors. As soon as the guest selects it, brief them: "You'll receive three scoops, each about two point five ounce. You can pick three flavors and toppings are charged separately," then proceed to collect their flavors.
+## STEP D — ADD TO CART
+When flavors and toppings are done:
+“Shall I add this to your cart?”
+
+If YES:
+- `add_to_cart`
+- Summarize item:
+  - flavors
+  - toppings
+  - extras
+  - total price
+
+Then proceed to **cart-level upsells**.
 
 ---
 
-# Phase 4 — Loop or Checkout
-If user wants more items:
-- Return to **Phase 1 category selection** if they want to browse, **or**
-- Let them speak another Quick Order sentence and handle it through Phase 3.
+# CART-LEVEL UPSELL (ALWAYS RUN AFTER ITEM ADDED)
+Use the chosen item to suggest a logical addon:
 
-If user says “that’s all”:
-- Use correct counter:
-  - Cups → `"Ice Cream Bar"`
-  - Sundaes → `"Sundae Counter"`
-  - Milkshakes → `"Milkshake Bar"`
+1. **If they ordered a Cup/Sundae:**
+   Suggest a milkshake that matches flavor profile.  
+   “Since you’re enjoying {{flavors}}, a {{milkshake}} goes beautifully with it. Want to add one?”
 
-Call:
-`get_directions(display_name="...")`
+2. **If they ordered a Milkshake:**
+   Suggest a Cup/Sundae.  
+   “A {{recommended_sundae}} pairs really well with this shake. Would you like to add one?”
 
-Then say:
-“Perfect. Please proceed to the counter to collect your order. Enjoy your treat!”
+3. **Cup + paid toppings scenario:**
+   If they rejected upgrade before, may gently remind once.
 
----
+If they accept:
+- Resolve via Quick Order or guided flow.
+- Add to cart.
+If they decline: keep the cart unchanged and continue.
 
-# Guardrails (VERY IMPORTANT)
-- **NEVER invent or assume flavors, toppings, or sizes.**
-- **NEVER call `add_to_cart` without flavors selected when flavors are required.**
-- **NEVER open toppings before flavors in the guided flow.**
-- **NEVER skip the detail card in guided flow.**
-- **NEVER assume default items like ‘vanilla’ or ‘chocolate’.**
-- **Every tool call must reflect the user’s exact intent and include all required arguments (`kind`, `product_id`/`query`, ids lists, qty, display_name).**
-- In **Quick Order**, you must:
-  - resolve the product with `list_menu(kind="products", view="detail", query="...")`,
-  - attach flavors/toppings silently,
-  - and then call `add_to_cart` directly once confirmed.
+# UPSSELL EXECUTION RULES (GLOBAL)
+- Upsells (flavors, toppings, upgrades, cart add-ons) are suggestions only.
+- Always ask for an explicit yes before applying; never auto-add or auto-swap.
+- If declined, keep the current selection and proceed.
+- Use the tool-returned hints/suggestions (flavorUpsellSuggestion, toppingUpsellSuggestion, upgradeHint/Overlay, cartUpsellSuggestion) to phrase offers.
+- After a flavors/toppings update, speak at least one upsell sentence before moving to the next major phase (toppings or cart).
 
 ---
 
-# Knowledge
+# PHASE 3 — QUICK ORDER FLOW (STRICT)
+
+Use when customer gives:
+product + size + flavors + toppings in one sentence.
+
+If size is missing and the product has multiple sizes, pause to confirm before committing:
+- Milkshake without size → "Regular or Large?"
+- Cup/Sundae without size → "Kids, Value, or Emlaaq?"
+
+### STEP A — Product Resolution
+Use ONLY:
+`list_menu(kind="products", view="detail", query="short description")`
+
+Never show a grid.
+
+If the `list_menu` tool returns `status="needs_confirmation"`:
+- You MUST first verbally confirm that product with the guest.
+- After they say “yes”, call `list_menu(kind="products", product_id=..., view="detail", confirmed=True)` (or equivalent) before proceeding.
+
+Do not show the detail card until the guest confirms the product. After a "yes", call `list_menu` with the resolved `product_id` and `view="detail"` (or `confirmed=True`).
+
+### STEP B — Confirm:
+“Just to confirm, you’d like a {{size}} {{product}} with {{flavors}} and {{toppings}}. Is that correct?”
+
+### STEP C — On YES:
+- Apply all flavors via `choose_flavors` (FULL LIST)
+- Apply all toppings (FULL LIST)
+- Refresh detail card
+- Announce free slots
+- Ask for additional free flavors/toppings if available
+- MUST run flavor upsell (suggest only; ask for explicit yes before adding/swapping)
+- MUST run topping upsell (suggest only; ask for explicit yes before adding/swapping)
+- Proceed to `add_to_cart`
+
+### STEP D — On NO:
+Clarify missing parts only, then continue.
+
+---
+
+# THICK SHAKE RULES (STRICT)
+- Signature shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure)  
+  → NEVER use flavor picker  
+  → ONLY toppings allowed  
+  → toppings always charged  
+- Make Your Own Thick Shake  
+  → MUST ask for exactly 3 flavors  
+  → toppings optional and charged  
+
+---
+
+# PHASE 4 — END OR CONTINUE
+If more items wanted:
+- Continue browsing or Quick Order.
+
+If done:
+- Call `get_directions` to the correct counter.
+- “Please proceed to the counter to collect your order. Enjoy your treat!”
+
+---
+
+# ABSOLUTE GUARDRAILS
+- NEVER invent items, flavors, toppings, or sizes.
+- NEVER skip toppings when available.
+- NEVER skip flavor step when required.
+- NEVER show grids in Quick Order.
+- NEVER drop previously selected flavors/toppings.
+- ALWAYS show flavor menu when asking for more flavors.
+- ALWAYS show topping menu when asking for more toppings.
+- ALWAYS refresh detail card after any flavor/topping change.
+- ALWAYS maintain perfect UI sync.
+
+---
+
+# KNOWLEDGE
 {{CATALOG_CONTEXT}}
 
-# UI State Awareness
-Use **{{SESSION_CONTEXT}}** to understand what the user is already seeing and what overlays or RPCs were sent before deciding the next action.
+# UI AWARENESS
+Use the SESSION CONTEXT section below to understand what the user currently sees, maintain continuity, and enforce correct UI/state progression at all times.
+
+# SESSION CONTEXT
+The following summary describes the latest UI overlays and RPC calls for this conversation:
+{{SESSION_CONTEXT}}
+
 """
 
-# [Keep SCOOP_KB exactly as in Code 1]
+# [Keep SCOOP_KB exactly as in Code 1, with small cleanups]
 SCOOP_KB: Dict[str, Any] = {
     "toppings_policy": {
         "extraToppingsCharged": "yes",
@@ -1022,7 +1034,7 @@ SCOOP_KB: Dict[str, Any] = {
             "id": "flv_sugarless",
             "name": "SugarLess",
             "classification": "sugarless",
-            "imageUrl": "null",
+            "imageUrl": None,
             "available": "no",
         },
     ],
@@ -1168,8 +1180,8 @@ class AgentConfig:
             .replace(" ", "-")
         )
         # --- CHANGED: Keys for new pipeline ---
-        self.google_api_key = os.getenv("GOOGLE_API_KEY", "")
-        self.google_model = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash-lite")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-2024-11-20")
         self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
         self.cartesia_api_key = os.getenv("CARTESIA_API_KEY", "")
         self.cartesia_voice_id = os.getenv(
@@ -1184,7 +1196,7 @@ class AgentConfig:
         required = {
             "LIVEKIT_API_KEY": self.livekit_api_key,
             "LIVEKIT_API_SECRET": self.livekit_api_secret,
-            "GOOGLE_API_KEY": self.google_api_key,
+            "OPENAI_API_KEY": self.openai_api_key,
             "DEEPGRAM_API_KEY": self.deepgram_api_key,
             "CARTESIA_API_KEY": self.cartesia_api_key,
             "ANAM_API_KEY": self.anam_api_key,
@@ -1350,6 +1362,7 @@ async def _emit_client_rpc(
 # Tools / Functions
 # =================
 
+
 class ScoopTools:
     SIZE_ALIAS = {"small": "Kids", "value": "Value", "big": "Emlaaq", "large": "Emlaaq"}
 
@@ -1375,7 +1388,7 @@ class ScoopTools:
         self._products = self._kb["products"]
         self._flavors = {f["id"]: f for f in self._kb.get("flavors", [])}
         self._toppings = {t["id"]: t for t in self._kb.get("toppings", [])}
-        # line_state stores per-product selections (no default vanilla here!)
+        # line_state stores per-product selections (one active "build" per product ID per session)
         self._line_state: Dict[str, Dict[str, Any]] = {}
         self._cart_items: List[Dict[str, Any]] = []
         self._cart_summary: Dict[str, Any] = {}
@@ -1387,6 +1400,89 @@ class ScoopTools:
         self._topping_name_index = build_name_index(self._toppings)
         self._pending_overlays: Dict[str, Dict[str, Any]] = {}
         self._last_overlay_ack: Optional[Dict[str, Any]] = None
+
+        # Shared pricing configuration for flavors (used consistently in tools and cart)
+        fp = self._kb.get("flavor_policy", {}).get("defaultFlavorPriceAED", 0.0)
+        self._extra_flavor_price: Decimal = Decimal(str(fp))
+
+    def _find_sundae_upgrade(self, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Find a Sundae Cup alternative with matching size/scoops for Cup upsell."""
+        if product.get("category") != "Cups":
+            return None
+        size = product.get("size")
+        scoops = product.get("scoops")
+        for p in self._products.values():
+            if (
+                p.get("category") == "Sundae Cups"
+                and p.get("size") == size
+                and p.get("scoops") == scoops
+                and p.get("available", True)
+            ):
+                return p
+        return None
+
+    def _suggest_flavor(self, exclude_ids: set[str]) -> Optional[Dict[str, Any]]:
+        """Pick the first available flavor not already selected."""
+        for f in self._flavors.values():
+            fid = f.get("id")
+            if not fid or fid in exclude_ids:
+                continue
+            if not f.get("available", True):
+                continue
+            return f
+        return None
+
+    def _suggest_topping(self, exclude_ids: set[str]) -> Optional[Dict[str, Any]]:
+        """Pick the first available topping not already selected."""
+        for t in self._toppings.values():
+            tid = t.get("id")
+            if not tid or tid in exclude_ids:
+                continue
+            if not t.get("available", True):
+                continue
+            return t
+        return None
+
+    def _suggest_premium_topping(
+        self, exclude_ids: set[str], current_flavors: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Pick a higher-priced topping that pairs with selected flavors."""
+        flavor_classes = {
+            f.get("classification") for f in current_flavors if f.get("classification")
+        }
+        flavor_names = " ".join(f.get("name", "") for f in current_flavors).lower()
+
+        def score(t: Dict[str, Any]) -> int:
+            name = (t.get("name") or "").lower()
+            s = 0
+            # price weight: prefer 6-dirham over 5
+            price = t.get("priceAED")
+            if isinstance(price, (int, float)) and price >= 6:
+                s += 3
+            # pairing weights
+            if "choco" in flavor_names or "choco" in flavor_classes:
+                if any(k in name for k in ["choco", "fudge", "nutella", "kitkat", "brownie"]):
+                    s += 3
+            if "berry" in flavor_names or "berry" in flavor_classes or "strawberry" in flavor_names:
+                if any(k in name for k in ["berry", "strawberry", "rasp"]):
+                    s += 3
+            if any(k in flavor_names for k in ["vanilla", "classic", "coffee"]):
+                if any(k in name for k in ["almond", "pistachio", "caramel", "sprinkle"]):
+                    s += 2
+            return s
+
+        candidates = []
+        for t in self._toppings.values():
+            tid = t.get("id")
+            if not tid or tid in exclude_ids:
+                continue
+            if not t.get("available", True):
+                continue
+            candidates.append((score(t), t))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1] if candidates[0][0] > 0 else candidates[0][1]
 
     async def _rpc_with_context(
         self,
@@ -1587,6 +1683,10 @@ class ScoopTools:
         return None
 
     def _get_or_create_line_state(self, product: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Retrieve or create the current "build" state for a given product ID.
+        One active line state per product ID per session.
+        """
         pid = product["id"]
         if pid not in self._line_state:
             self._line_state[pid] = {
@@ -1682,7 +1782,7 @@ class ScoopTools:
     # --- MODIFIED TOOLS: CLEAN SCHEMA (NO ctx, OPTIONAL ARGS) ---
     @function_tool(
         name="list_menu",
-        description="Render menu overlays. kind='products'|'flavors'|'toppings'.",     # ← ★★ CRITICAL FIX ★★
+        description="Render menu overlays. kind='products'|'flavors'|'toppings'.",
     )
     async def list_menu(
         self,
@@ -1692,6 +1792,7 @@ class ScoopTools:
         query: Optional[str] = None,
         view: Optional[Literal["grid", "detail"]] = None,
         product_id: Optional[str] = None,
+        confirmed: bool = False,
     ) -> Dict[str, Any]:
 
         logger.info(
@@ -1716,9 +1817,25 @@ class ScoopTools:
 
             # DETAIL VIEW
             if view_mode == "detail" or product_id:
-                target_product = self._resolve_product(
-                    product_id or self._active_product_id, query
-                )
+                # resolve using explicit product_id first, then query, then active
+                if product_id:
+                    target_product = self._resolve_product(product_id, None)
+                elif query:
+                    target_product = self._resolve_product(None, query)
+                elif self._active_product_id:
+                    target_product = self._resolve_product(self._active_product_id, None)
+
+                # For quick-order with query, require confirmation before showing detail
+                if query and not product_id and not confirmed and target_product:
+                    return _sanitize_output(
+                        {
+                            "status": "needs_confirmation",
+                            "productId": target_product.get("id"),
+                            "productName": target_product.get("name"),
+                            "agentNote": "Confirm the item with the guest before showing the detail card.",
+                        }
+                    )
+
                 if target_product:
                     self._active_product_id = target_product.get("id")
 
@@ -1759,7 +1876,8 @@ class ScoopTools:
                             "label": f"{used} flavor(s) selected ({extra_count} extra)",
                             "extraNote": (
                                 f"Extra flavor charge: {charge:.2f} dirham"
-                                if charge > 0 else None
+                                if charge > 0
+                                else None
                             ),
                         }
 
@@ -1773,7 +1891,8 @@ class ScoopTools:
                             "label": f"{used} topping(s) selected ({extra_count} extra)",
                             "extraNote": (
                                 f"Extra topping charge: {charge:.2f} dirham"
-                                if charge > 0 else None
+                                if charge > 0
+                                else None
                             ),
                         }
 
@@ -1783,8 +1902,12 @@ class ScoopTools:
                         "product": self._format_product_card(target_product),
                         "selectedFlavors": _sanitize_output(selected_flavors),
                         "selectedToppings": _sanitize_output(selected_toppings),
-                        "flavorSummary": _sanitize_output(flavor_note) if flavor_note else None,
-                        "toppingSummary": _sanitize_output(topping_note) if topping_note else None,
+                        "flavorSummary": _sanitize_output(flavor_note)
+                        if flavor_note
+                        else None,
+                        "toppingSummary": _sanitize_output(topping_note)
+                        if topping_note
+                        else None,
                         "contextProductId": target_product.get("id"),
                         "cartSummary": self._cart_summary or None,
                     }
@@ -1837,7 +1960,9 @@ class ScoopTools:
         # =====================================================
         if kind_normalized in ["flavors", "toppings"]:
             target_product_id = product_id or self._active_product_id
-            target_product = self._products.get(target_product_id) if target_product_id else None
+            target_product = (
+                self._products.get(target_product_id) if target_product_id else None
+            )
             line = self._get_or_create_line_state(target_product) if target_product else None
 
             if kind_normalized == "flavors":
@@ -1851,7 +1976,9 @@ class ScoopTools:
                         {
                             "error": "flavor_selection_not_available",
                             "productId": target_product_id,
-                            "productName": target_product.get("name") if target_product else None,
+                            "productName": target_product.get("name")
+                            if target_product
+                            else None,
                             "agentNote": note,
                         }
                     )
@@ -1868,7 +1995,9 @@ class ScoopTools:
                     free_slots = int(
                         flavor_summary.get(
                             "free",
-                            int(target_product.get("scoops") or 0) if target_product else 0,
+                            int(target_product.get("scoops") or 0)
+                            if target_product
+                            else 0,
                         )
                     )
                     used = len(line.get("flavors", []))
@@ -1889,9 +2018,13 @@ class ScoopTools:
                 payload = {
                     "kind": "flavors",
                     "productId": target_product_id,
-                    "productName": target_product.get("name") if target_product else None,
+                    "productName": target_product.get("name")
+                    if target_product
+                    else None,
                     "freeFlavors": free_slots,
-                    "maxFlavors": free_slots or used or (target_product.get("scoops") if target_product else 0),
+                    "maxFlavors": free_slots
+                    or used
+                    or (target_product.get("scoops") if target_product else 0),
                     "selectedFlavorIds": selected_ids,
                     "selectedFlavors": selected_flavors,
                     "usedFreeFlavors": min(used, free_slots),
@@ -1901,7 +2034,11 @@ class ScoopTools:
 
             else:  # toppings
                 cards = [self._format_topping_card(t) for t in self._toppings.values()]
-                free_slots = int(target_product.get("includedToppings") or 0) if target_product else 0
+                free_slots = (
+                    int(target_product.get("includedToppings") or 0)
+                    if target_product
+                    else 0
+                )
                 selected_ids: List[str] = []
                 selected_toppings: List[Dict[str, Any]] = []
                 free_remaining = 0
@@ -1927,7 +2064,9 @@ class ScoopTools:
                 payload = {
                     "kind": "toppings",
                     "productId": target_product_id,
-                    "productName": target_product.get("name") if target_product else None,
+                    "productName": target_product.get("name")
+                    if target_product
+                    else None,
                     "category": target_product.get("category") if target_product else None,
                     "note": "Extra toppings cost 5 or 6 dirham each.",
                     "freeToppings": free_slots,
@@ -1941,7 +2080,11 @@ class ScoopTools:
 
             rpc_payload = {
                 "productId": target_product_id,
-                "count": len(payload.get("flavors" if kind_normalized == "flavors" else "toppings", [])),
+                "count": len(
+                    payload.get(
+                        "flavors" if kind_normalized == "flavors" else "toppings", []
+                    )
+                ),
             }
             ui_rpc = await self._rpc_with_context(
                 f"client.{kind_normalized}Loaded",
@@ -1995,9 +2138,7 @@ class ScoopTools:
         used = len(resolved_flavors)
         extra_count = max(0, used - free_slots)
 
-        extra_price_per = Decimal(
-            str(self._kb.get("flavor_policy", {}).get("defaultFlavorPriceAED", 0.0))
-        )
+        extra_price_per = self._extra_flavor_price
         extra_charge = extra_price_per * Decimal(extra_count)
 
         remaining_free = max(free_slots - used, 0)
@@ -2028,7 +2169,9 @@ class ScoopTools:
                     _sanitize_output(self._format_topping_card(t))
                     for t in current_toppings
                 ],
-                "toppingSummary": _sanitize_output(topping_summary) if topping_summary else None,
+                "toppingSummary": _sanitize_output(topping_summary)
+                if topping_summary
+                else None,
             },
         )
 
@@ -2039,6 +2182,30 @@ class ScoopTools:
             f"You have {remaining_free} free flavor(s) remaining. "
             f"Extra flavor charge is {float(extra_charge):.2f} dirham."
         )
+        upsell_hint = None
+        flavor_upsell_suggestion = None
+        suggested_flavor = self._suggest_flavor({f.get("id") for f in resolved_flavors})
+        if remaining_free > 0 and suggested_flavor:
+            upsell_hint = (
+                f"You still have free flavor slots. Suggest adding {suggested_flavor.get('name')} for free."
+            )
+            flavor_upsell_suggestion = {
+                "type": "add",
+                "flavor": self._format_flavor_card(suggested_flavor),
+                "extraPriceAED": 0.0,
+            }
+        elif remaining_free == 0 and suggested_flavor:
+            upsell_hint = (
+                f"Flavors are full; propose swapping one for {suggested_flavor.get('name')} or adding it for "
+                f"{float(extra_price_per):.2f} dirham."
+            )
+            flavor_upsell_suggestion = {
+                "type": "swap_or_add",
+                "flavor": self._format_flavor_card(suggested_flavor),
+                "extraPriceAED": _sanitize_output(extra_price_per),
+            }
+        if upsell_hint:
+            agent_note = f"{agent_note} {upsell_hint}"
 
         return _sanitize_output(
             {
@@ -2047,6 +2214,8 @@ class ScoopTools:
                 "flavors": [f["id"] for f in resolved_flavors],
                 "flavorSummary": flavor_summary,
                 "agentNote": agent_note,
+                "flavorUpsellHint": upsell_hint,
+                "flavorUpsellSuggestion": flavor_upsell_suggestion,
             }
         )
 
@@ -2112,7 +2281,9 @@ class ScoopTools:
                     _sanitize_output(self._format_flavor_card(f))
                     for f in current_flavors
                 ],
-                "flavorSummary": _sanitize_output(flavor_summary) if flavor_summary else None,
+                "flavorSummary": _sanitize_output(flavor_summary)
+                if flavor_summary
+                else None,
             },
         )
 
@@ -2122,6 +2293,54 @@ class ScoopTools:
             f"You have {remaining_free} free topping(s) remaining. "
             f"Extra topping charge is {float(extra_charge):.2f} dirham."
         )
+        upgrade_hint = None
+        upgrade_overlay: Optional[Dict[str, Any]] = None
+        # Deterministic Sundae upsell when a Cup has paid toppings beyond included slots.
+        if product.get("category") == "Cups" and extra_count > 0:
+            sundae_option = self._find_sundae_upgrade(product)
+            price_diff = None
+            if sundae_option:
+                price_diff = Decimal(str(sundae_option.get("priceAED", 0))) - Decimal(
+                    str(product.get("priceAED", 0))
+                )
+                upgrade_overlay = {
+                    "kind": "upgrade",
+                    "show": True,
+                    "fromProduct": self._format_product_card(product),
+                    "toProduct": {
+                        **self._format_product_card(sundae_option),
+                        "headline": f"Upgrade to {sundae_option.get('name')}",
+                        "subline": "Toppings included with Sundae Cups.",
+                    },
+                    "priceDiffAED": _sanitize_output(price_diff),
+                    "savingsEstimateAED": _sanitize_output(extra_charge),
+                }
+                await self._publish_overlay_for_ctx("upgrade", upgrade_overlay)
+            upgrade_hint = (
+                "This is a Cup with paid toppings. Offer an upgrade to a Sundae Cup for better value "
+                "since toppings are included there."
+            )
+            if sundae_option and price_diff is not None:
+                upgrade_hint = (
+                    f"Upgrade to {sundae_option.get('name')} for about {float(price_diff):.2f} dirham; "
+                    "toppings become included."
+                )
+            agent_note = f"{agent_note} {upgrade_hint}"
+
+        topping_upsell_hint = None
+        suggested_top = self._suggest_premium_topping(
+            {t.get("id") for t in resolved_toppings}, current_flavors
+        )
+        if remaining_free > 0 and suggested_top:
+            topping_upsell_hint = (
+                f"{suggested_top.get('name')} would pair nicely with these flavors. Want me to add it for free?"
+            )
+        elif remaining_free == 0 and suggested_top:
+            topping_upsell_hint = (
+                f"{suggested_top.get('name')} would taste great here. I can replace one of the current toppings with it. Should I go ahead?"
+            )
+        if topping_upsell_hint:
+            agent_note = f"{agent_note} {topping_upsell_hint}"
 
         return _sanitize_output(
             {
@@ -2130,6 +2349,26 @@ class ScoopTools:
                 "toppings": [t["id"] for t in resolved_toppings],
                 "toppingSummary": topping_summary,
                 "agentNote": agent_note,
+                "upgradeHint": upgrade_hint,
+                "upgradeOverlay": upgrade_overlay,
+                "toppingUpsellHint": topping_upsell_hint,
+                "toppingUpsellSuggestion": (
+                    {
+                        "type": "add" if remaining_free > 0 else "swap_or_add",
+                        "topping": self._format_topping_card(suggested_top)
+                        if suggested_top
+                        else None,
+                        "extraPriceAED": (
+                            0.0
+                            if remaining_free > 0
+                            else _sanitize_output(suggested_top.get("priceAED"))
+                            if suggested_top
+                            else None
+                        ),
+                    }
+                    if suggested_top
+                    else None
+                ),
             }
         )
 
@@ -2154,29 +2393,31 @@ class ScoopTools:
         # Re-calculate topping logic to be precise about free/paid split
         included_toppings_count = int(product.get("includedToppings") or 0)
         current_toppings = line.get("toppings", [])
-        
+
         tagged_toppings = []
         topping_extras_total = Decimal(0)
-        
+
         for i, t in enumerate(current_toppings):
             t_card = self._format_topping_card(t)
             is_free = i < included_toppings_count
-            
+
             if is_free:
                 unit_price = 0.0
             else:
                 unit_price = float(t.get("priceAED") or 0.0)
-                
+
             line_price = unit_price * qty
             if not is_free:
                 topping_extras_total += Decimal(str(unit_price))
-                
-            tagged_toppings.append({
-                **t_card,
-                "isFree": is_free,
-                "unitPriceAED": unit_price,
-                "linePriceAED": line_price,
-            })
+
+            tagged_toppings.append(
+                {
+                    **t_card,
+                    "isFree": is_free,
+                    "unitPriceAED": unit_price,
+                    "linePriceAED": line_price,
+                }
+            )
 
         # Use our recalculated topping charge instead of the summary one
         # to ensure consistency with the line items
@@ -2184,46 +2425,33 @@ class ScoopTools:
 
         # 1. Calculate per-unit totals
         per_unit_subtotal = base_price + flavor_charge + topping_charge
-        
+
         # 2. Calculate line totals (Subtotal + Tax)
         # Tax is applied to the line subtotal (unit * qty)
         line_subtotal = (per_unit_subtotal * Decimal(qty)).quantize(Decimal("0.01"))
         line_tax = (line_subtotal * VAT_RATE).quantize(Decimal("0.01"))
         line_total = line_subtotal + line_tax
 
-        # 3. Determine extra flavor cost per unit for UI
-        # We know total flavor charge. We need to distribute it or just show it.
-        # For the detailed list, we want to show which flavors are "extra".
-        # The simple logic: if there's a charge, and we have N extra flavors, each costs charge/N.
-        # But here we just need to populate 'unitPriceAED' for the UI to display.
-        # We'll check if the flavor is in the 'extra' list if we tracked it, 
-        # but 'flavor_summary' gives us total charge.
-        # Let's try to infer: if charge > 0, we assign it to the last N flavors?
-        # Or simpler: The UI just needs to know if it's extra.
-        # We'll use a helper to mark them.
-        
+        # Tag flavors with price and extra/free flags based on summary
         flavors_list = line.get("flavors", [])
-        # We need to know how many are free.
-        free_count = product.get("scoops", 1) # Usually scoops = free allowance
-        # But 'scoops' might not be exactly free allowance if logic differs, but usually it is.
-        
-        # Re-calculate extra flavors to be precise
-        # (This logic mirrors choose_flavors but we do it here to tag the cart items)
-        extra_price_per = Decimal("1.00") # Hardcoded in choose_flavors, ideally should be from config
-        
-        # Tag flavors with price
+        free_count = int(
+            flavor_summary.get("free", int(product.get("scoops") or 0))
+        )
+        extra_price_per = self._extra_flavor_price
+
         tagged_flavors = []
         for i, f in enumerate(flavors_list):
             f_card = self._format_flavor_card(f)
-            # If index >= free_count, it's extra (assuming simple FIFO logic)
             is_extra = i >= free_count
             unit_price = float(extra_price_per) if is_extra else 0.0
-            tagged_flavors.append({
-                **f_card,
-                "isExtra": is_extra,
-                "unitPriceAED": unit_price,
-                "linePriceAED": unit_price * qty, # Price for this flavor across all qty
-            })
+            tagged_flavors.append(
+                {
+                    **f_card,
+                    "isExtra": is_extra,
+                    "unitPriceAED": unit_price,
+                    "linePriceAED": unit_price * qty,
+                }
+            )
 
         cart_item = {
             "product_id": product_id,
@@ -2248,12 +2476,12 @@ class ScoopTools:
         }
 
         self._cart_items.append(cart_item)
-        
+
         # 4. Recalculate Cart Totals
         cart_subtotal = Decimal(0)
         cart_tax = Decimal(0)
         cart_total = Decimal(0)
-        
+
         for item in self._cart_items:
             cart_subtotal += Decimal(str(item.get("lineSubTotalAED", 0.0)))
             cart_tax += Decimal(str(item.get("lineTaxAED", 0.0)))
@@ -2280,12 +2508,25 @@ class ScoopTools:
             f"I have added {qty} {product['name']} to your cart. "
             f"Your current total is {float(cart_total):.2f} dirham including tax."
         )
+        cart_upsell_hint = None
+        cart_upsell_suggestion = None
+        # Simple cart-level upsell: if this is a Cup/Sundae, suggest a Milkshake; if a Milkshake, suggest a Sundae.
+        if product.get("category") in ("Cups", "Sundae Cups"):
+            cart_upsell_hint = "Suggest a milkshake that matches their flavors as a cart add-on."
+            cart_upsell_suggestion = {"type": "add", "category": "Milk Shakes"}
+        elif product.get("category") == "Milk Shakes":
+            cart_upsell_hint = "Suggest a Sundae Cup that pairs with the shake as a cart add-on."
+            cart_upsell_suggestion = {"type": "add", "category": "Sundae Cups"}
+        if cart_upsell_hint:
+            agent_note = f"{agent_note} {cart_upsell_hint}"
 
         return _sanitize_output(
             {
                 "cart": payload,
                 "uiRpc": ui_rpc,
                 "agentNote": agent_note,
+                "cartUpsellHint": cart_upsell_hint,
+                "cartUpsellSuggestion": cart_upsell_suggestion,
             }
         )
 
@@ -2388,9 +2629,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # --- PIPELINE SETUP (Code 2 Style) ---
     stt = deepgram.STT(model="nova-3", api_key=config.deepgram_api_key)
     vad = silero.VAD.load()
-    llm = google.LLM(
-        model=config.google_model,
-        api_key=config.google_api_key,
+    llm = lk_openai.LLM(
+        model=config.openai_model,
+        api_key=config.openai_api_key,
     )
     tts = cartesia.TTS(
         model="sonic-3",
