@@ -6,7 +6,7 @@ Python worker that drives the Scoop Haven kiosk avatar. It combines an embedded 
 
 - Python 3.11+ (tested with 3.13)
 - LiveKit project and avatar credentials
-- Deepgram, Google, Cartesia API keys
+- Deepgram, OpenAI, Cartesia API keys
 - Anam replica credentials
 
 Install dependencies in an isolated environment:
@@ -26,7 +26,7 @@ Create `agents/.env` with:
 | `LIVEKIT_URL` | LiveKit host (e.g. `wss://your-project.livekit.cloud`) |
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | API credentials with room access |
 | `LIVEKIT_AGENT_NAME` / `LIVEKIT_AGENT_IDENTITY_PREFIX` | Optional overrides for participant naming |
-| `GOOGLE_API_KEY` / `GOOGLE_MODEL` | Gemini LLM (defaults to `gemini-2.5-flash-lite`) |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI LLM (defaults to `gpt-4o`) |
 | `DEEPGRAM_API_KEY` | STT (nova-3) |
 | `CARTESIA_API_KEY` / `CARTESIA_VOICE_ID` | TTS (sonic-3, custom voice) |
 | `ANAM_API_KEY` / `ANAM_AVATAR_ID` | Anam replica credentials |
@@ -41,11 +41,17 @@ LiveKit room
 ├─ Controller participant (browser client)
 └─ Worker (this process)
    ├─ Knowledge base (SCOOP_KB)
-   ├─ AgentSession: Deepgram STT + Silero VAD + Google Gemini LLM + Cartesia TTS
+   ├─ AgentSession: Deepgram STT + Silero VAD + OpenAI LLM (GPT-4o) + Cartesia TTS
    ├─ Tools: list_menu, choose_flavors, choose_toppings, add_to_cart, get_directions
    ├─ RPC publisher: client.menuLoaded / client.flavorsLoaded / client.toppingsLoaded / client.cartUpdated / client.directions
    └─ Legacy overlay stream: topic `ui.overlay`
 ```
+
+
+### Technical Notes
+
+- **ScoopTools**: Encapsulates all business logic (pricing, inventory, upsells). It maintains a temporary `line_state` for products being customized (adding flavors/toppings) before they are committed to the cart.
+- **Upsell Engine**: Logic within `choose_flavors` and `choose_toppings` automatically calculates best-value upgrades (e.g. "free flavor available" or "switch to Sundae to save on toppings") and returns conversational hints to the LLM.
 
 ### Tool behaviour
 

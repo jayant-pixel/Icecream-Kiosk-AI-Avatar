@@ -9,7 +9,7 @@
 Browser (Next.js) --- media/data ---> LiveKit Room <--- media/data --- Python AgentSession
                                            │
                                            ├─ STT: Deepgram (nova-3) + Silero VAD
-                                           ├─ LLM: Google Gemini (tools enabled)
+                                           ├─ LLM: OpenAI (GPT-4o, tools enabled)
                                            ├─ TTS: Cartesia (sonic-3, custom voice)
                                            └─ Avatar video: Anam persona stream
 ```
@@ -17,17 +17,37 @@ Browser (Next.js) --- media/data ---> LiveKit Room <--- media/data --- Python Ag
 ## Knowledge base and tools
 `SCOOP_KB` ships the full catalog (products, toppings, flavors, pickup displays) so no external webhooks are required.
 
-### Tool-to-action map (what each action calls)
-| Action | Function | RPC emitted | Overlay topic |
-| --- | --- | --- | --- |
-| Show product grid/detail | `list_menu(kind="products", ...)` | `client.menuLoaded` | `products` |
-| Open flavor picker | `list_menu(kind="flavors", product_id=...)` | `client.flavorsLoaded` | `flavors` |
-| Open toppings picker | `list_menu(kind="toppings", product_id=...)` | `client.toppingsLoaded` | `toppings` |
-| Apply flavors and recompute free/extra | `choose_flavors(product_id, flavor_ids)` | — (detail overlay refreshed) | `products` |
-| Apply toppings and recompute free/extra | `choose_toppings(product_id, topping_ids)` | — (detail overlay refreshed) | `products` |
-| Add to cart (VAT + extras) | `add_to_cart(product_id, qty)` | `client.cartUpdated` | `cart` |
-| Show pickup guidance | `get_directions(display_name, extra_displays?)` | `client.directions` | `directions` |
-| UI button add-to-cart | RPC `agent.addToCart` triggers `add_to_cart` internally | n/a | n/a |
+### Tool-to-action map
+
+| Tool | Purpose | RPC emitted | Overlay / UI Effect | Upsell Logic |
+| --- | --- | --- | --- | --- |
+| `list_menu` | Show menu grid or product detail | `client.menuLoaded` | `products` (Grid/Detail) | Validates product confirmation for quick orders. |
+| `choose_flavors` | Attach flavors to current line item | — | `products` (Detail refresh) | Suggests free flavors if slots open; paid if full. |
+| `choose_toppings` | Attach toppings to current line item | — | `products` (Detail refresh) | **Sundae Upgrade**: Suggests switching from Cup to Sundae if paid toppings exceed cost difference. |
+| `add_to_cart` | Commit line item to cart | `client.cartUpdated` | `cart` + **Toast** notification | Suggests cross-category items (Shake <-> Sundae). |
+| `get_directions` | Show pickup map | `client.directions` | `directions` | — |
+
+**Note**: The frontend `ProductShowcase` component listens for `client.products` (action="added") to trigger a visual Toast notification when items are added.
+
+### State Management
+
+The agent uses `ScoopSessionState` and `ScoopTools` to manage conversational and cart state:
+
+1.  **Line Items**: When a user selects a product, it's not immediately in the cart. It sits in a "staging" area (`_active_product_id`, `_line_state`) where flavors and toppings are modified.
+2.  **Pricing Engine**: Real-time calculation of VAT (5%), included vs. paid toppings, and extra scoop charges.
+3.  **Cart State**: committed only when `add_to_cart` is called. The agent then recalculates the full cart total (subtotal + tax) and broadcasts it via `client.cartUpdated`.
+
+### RPC & Events
+
+The system uses a robust RPC protocol for UI synchronization:
+
+- **Agent -> Client**:
+    - `client.menuLoaded`: Updates grid/detail view.
+    - `client.cartUpdated`: Pushes full cart summary (items, tax breakdown, totals).
+    - `client.directions`: Pushes list of pickup counters with hints/images.
+- **Client -> Agent**:
+    - `agent.addToCart`: Triggered by "Add" button in UI; calls `tools.add_to_cart`.
+    - `agent.overlayAck`: Confirms receipt/display of overlays (for reliability).
 
 If a client misses an RPC, the worker sends the same payload type through the `ui.overlay` data channel for graceful degradation.
 
@@ -35,7 +55,7 @@ If a client misses an RPC, the worker sends the same payload type through the `u
 1. **Environment (`agents/.env`)**
    - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
    - `LIVEKIT_AGENT_NAME`, `LIVEKIT_AGENT_IDENTITY_PREFIX` (optional overrides)
-   - `GOOGLE_API_KEY`, `GOOGLE_MODEL` (defaults to `gemini-2.5-flash-lite`)
+   - `OPENAI_API_KEY`, `OPENAI_MODEL` (defaults to `gpt-4o-2024-11-20`)
    - `DEEPGRAM_API_KEY`
    - `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`
    - `ANAM_API_KEY`, `ANAM_AVATAR_ID`

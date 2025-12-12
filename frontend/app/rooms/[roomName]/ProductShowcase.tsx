@@ -353,7 +353,7 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
     if (mode === "detail") {
       return (
         <div className="flex flex-col h-full">
-          <div className="relative flex-1 w-full overflow-hidden rounded-[32px] bg-white p-6 shadow-xl border border-black/5 overflow-y-auto scrollbar-thin scrollbar-thumb-black/10 scrollbar-track-transparent">
+          <div className="relative flex-1 w-full overflow-hidden rounded-[32px] bg-white p-6 shadow-xl border border-black/5">
             <div className="flex h-56 w-full items-center justify-center rounded-2xl bg-black/5 mb-6 shadow-inner shrink-0">
               {primaryCard.imageUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -686,7 +686,7 @@ export function ProductShowcase({ className, directions }: ProductShowcaseProps 
   const detailCard = detailPanelContent ? (
     <div className="flex w-full justify-center lg:justify-end">
       <div className="pointer-events-auto w-full max-w-md px-4 pb-4 lg:fixed lg:right-12 lg:top-1/2 lg:w-auto lg:max-w-[400px] lg:-translate-y-1/2 lg:px-0 lg:pb-0 lg:z-30">
-        <div className="max-h-[85vh] overflow-y-auto rounded-[32px] shadow-2xl">
+        <div className="max-h-[85vh] overflow-y-auto rounded-[32px] shadow-2xl scrollbar-thin scrollbar-thumb-[color:var(--icecream-primary)]/20 scrollbar-track-transparent">
           {detailPanelContent}
         </div>
       </div>

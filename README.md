@@ -1,6 +1,16 @@
 # Icecream Kiosk AI Avatar
 
-LiveKit-driven kiosk that pairs a Python avatar worker (Anam persona with Deepgram STT, Silero VAD, Google Gemini LLM, and Cartesia TTS) with a Next.js frontend. The agent owns the menu/pickup knowledge base, orchestrates UI state via RPC, and the browser renders the avatar stream plus product and pickup cards.
+LiveKit-driven kiosk that pairs a Python avatar worker (Anam persona with Deepgram STT, Silero VAD, OpenAI LLM (GPT-4o), and Cartesia TTS) with a Next.js frontend. The agent owns the menu/pickup knowledge base, orchestrates UI state via RPC, and the browser renders the avatar stream plus product and pickup cards.
+
+## Key Features
+
+- **Hybrid Architecture**: Uses high-speed RPCs for UI state synchronization while maintaining a legacy overlay stream for backup.
+- **Stateful Order Builder**: The agent tracks "line items" (flavors, toppings) incrementally, allowing complex customization before committing to the cart.
+- **Smart Upsells**:
+  - **Flavor Logic**: Suggests free flavors if slots remain, or paid upgrades if full.
+  - **Sundae Upgrade**: Detects when a user adds paid toppings to a Cup and suggests upgrading to a Sundae (where toppings are included).
+  - **Cross-Sell**: Suggests pairing Milkshakes with Sundaes or vice versa during checkout.
+- **Real-time Feedback**: Frontend shows instant "Added to cart" toasts and dynamic price updates (VAT + extras) driven by the agent.
 
 ---
 
@@ -15,7 +25,7 @@ Browser (Next.js 15)
           │                     ▼
 Python worker (agents/avatar_anam.py)
   - Deepgram STT + Silero VAD
-  - Google Gemini LLM (tools enabled)
+  - OpenAI LLM (GPT-4o, tools enabled)
   - Cartesia TTS
   - Anam avatar stream
   - RPC + overlays: menu, flavors, toppings, cart, directions
@@ -36,7 +46,7 @@ frontend/   # Next.js 15 UI that joins LiveKit and reacts to RPC + overlays
 
 | Component | Requirement |
 | --- | --- |
-| Agent | Python 3.11+, LiveKit Cloud project, Anam credentials, Deepgram/Google/Cartesia API keys |
+| Agent | Python 3.11+, LiveKit Cloud project, Anam credentials, Deepgram/OpenAI/Cartesia API keys |
 | Frontend | Node 20+ / npm 10+, LiveKit token credentials |
 
 Optional: Docker to containerize the worker.
@@ -65,8 +75,8 @@ Optional: Docker to containerize the worker.
    LIVEKIT_AGENT_NAME=baskin-avatar
    LIVEKIT_AGENT_IDENTITY_PREFIX=baskin-avatar
 
-   GOOGLE_API_KEY=...
-   GOOGLE_MODEL=gemini-2.5-flash-lite
+   OPENAI_API_KEY=...
+   OPENAI_MODEL=gpt-4o
    DEEPGRAM_API_KEY=...
    CARTESIA_API_KEY=...
    CARTESIA_VOICE_ID=829ccd10-f8b3-43cd-b8a0-4aeaa81f3b30

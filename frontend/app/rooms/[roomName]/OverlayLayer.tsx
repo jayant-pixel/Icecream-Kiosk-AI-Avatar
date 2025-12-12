@@ -566,12 +566,14 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
     return (
       <div
         className={clsx(
-          "w-full shrink-0 overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl",
+          "w-full shrink-0 overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl flex flex-col",
           heightClass,
           widthClass
         )}
       >
-        <div className="h-full overflow-y-auto pr-1">{content}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-[color:var(--icecream-primary)]/20 scrollbar-track-transparent">
+          {content}
+        </div>
       </div>
     );
   }, []);
@@ -1213,7 +1215,9 @@ function ToppingPriceGroup({ title, items, selectedIds }: { title: string; items
   }
   return (
     <div className="space-y-2">
-      <p className="text-sm font-semibold">{title}</p>
+      <p className="text-sm font-semibold text-[color:var(--icecream-dark)] selection:bg-[color:var(--icecream-primary)]/20 selection:text-black">
+        {title}
+      </p>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-2">
         {items.map((item) => {
           const selected = selectedIds.has(item.id ?? "");
