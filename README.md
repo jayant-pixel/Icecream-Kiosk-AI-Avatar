@@ -230,5 +230,82 @@ lk agent logs --id CA_WBqzxRkUtMFh
 - [LiveKit Agents SDK](https://docs.livekit.io/agents/)
 - [LiveKit Realtime RPC](https://docs.livekit.io/home/client/data/rpc/)
 - [Anam Avatars](https://github.com/anam-ai/)
+- [Simli Avatars](https://docs.simli.com/)
+
+---
+
+## Switching Avatar Providers (Anam ↔ Simli)
+
+The project supports both **Anam** and **Simli** avatar providers. Below are the changes needed when switching between them.
+
+### Backend Changes (`agents/avatar_anam.py`)
+
+**For Anam:**
+```python
+# Import
+from livekit.plugins.anam import avatar as anam_avatar
+
+# Avatar Session
+avatar_session = anam_avatar.AvatarSession(
+    persona_config=anam_avatar.PersonaConfig(
+        name=config.agent_name,
+        avatarId=config.anam_avatar_id,
+    ),
+    api_key=config.anam_api_key,
+    avatar_participant_name=config.agent_name,
+    avatar_participant_identity=agent_identity,
+)
+```
+
+**For Simli:**
+```python
+# Import
+from livekit.plugins import simli
+
+# Avatar Session
+avatar_session = simli.AvatarSession(
+    simli_config=simli.SimliConfig(
+        api_key=config.simli_api_key,
+        face_id=config.simli_face_id,
+    ),
+    avatar_participant_name=config.agent_name,
+)
+```
+
+### Environment Variables
+
+| Provider | Required Variables |
+| --- | --- |
+| Anam | `ANAM_API_KEY`, `ANAM_AVATAR_ID` |
+| Simli | `SIMLI_API_KEY`, `SIMLI_FACE_ID` (optional, has default) |
+
+### Frontend Changes (`frontend/app/rooms/[roomName]/VideoConference.tsx`)
+
+The video styling differs based on the avatar provider's aspect ratio:
+
+**For Anam (use `object-contain`):**
+```tsx
+<VideoTrack
+  className="h-full w-full max-w-[1200px] object-contain"
+  trackRef={avatarTrack}
+/>
+```
+
+**For Simli (use `object-cover object-center`):**
+```tsx
+<VideoTrack
+  className="h-full w-full max-w-[1200px] object-cover object-center"
+  trackRef={avatarTrack}
+/>
+```
+
+### Requirements (`agents/requirements.txt`)
+
+| Provider | Package |
+| --- | --- |
+| Anam | `livekit-plugins-anam==1.3.3` |
+| Simli | `livekit-plugins-simli==1.3.3` |
+
+---
 
 Happy scooping!

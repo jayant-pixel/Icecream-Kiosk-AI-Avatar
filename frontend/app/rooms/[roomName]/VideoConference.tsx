@@ -70,12 +70,15 @@ export function VideoConference({
       className="relative flex h-screen w-full flex-col overflow-hidden"
       {...props}
     >
-      <div className="relative flex flex-1 items-center justify-center bg-black/30 backdrop-blur-sm">
+      <div className="relative flex flex-1 items-start justify-center bg-black">
         {avatarTrack ? (
-          <VideoTrack
-            className="h-full w-full max-w-[1200px] object-contain"
-            trackRef={avatarTrack}
-          />
+          <div className="absolute inset-0 flex overflow-hidden items-start justify-center bg-black">
+            <VideoTrack
+              className="h-full w-auto object-cover"
+              style={{ filter: 'contrast(1.1) saturate(1.2)' }}
+              trackRef={avatarTrack}
+            />
+          </div>
         ) : (
           <div className="flex h-full w-full items-center justify-center text-[color:var(--icecream-dark)]">
             <div className="rounded-[32px] border border-black/5 bg-white px-10 py-8 text-center shadow-2xl">

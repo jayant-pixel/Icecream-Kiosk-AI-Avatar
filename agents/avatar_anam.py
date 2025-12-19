@@ -39,8 +39,9 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice.room_io import RoomInputOptions
 
 # --- CHANGED: New Plugin Imports ---
-from livekit.plugins import openai as lk_openai, deepgram, cartesia, silero
-from livekit.plugins.anam import avatar as anam_avatar
+from livekit.plugins import openai as lk_openai, deepgram, cartesia, silero, simli
+# from livekit.plugins import google as lk_google  # COMMENTED OUT: Using OpenAI
+# from livekit.plugins.anam import avatar as anam_avatar  # COMMENTED OUT: Switched to Simli
 
 logger = logging.getLogger("baskin-avatar-agent")
 logger.setLevel(logging.INFO)
@@ -308,64 +309,63 @@ You MUST analyze the chosen flavors and offer one improvement:
 
 - **If free slots remain:**
   Suggest a complimentary flavor.  
-  “Since you have {{flavors}}, {{suggested}} is a great match and still free. Shall I add it?”
+  "Since you have {{flavors}}, {{suggested}} is a great match and still free. Shall I add it?"
 
 - **If free slots are full:**
-  Suggest a swap.  
-  “If you’d like, we can swap {{weak_flavor}} for {{better_flavor}} at no extra cost.”
+  Suggest a swap (NO extra flavors allowed).  
+  "If you'd like, we can swap {{weak_flavor}} for {{better_flavor}} at no extra cost."
 
-- **After swap decline:**
-  Offer a paid flavor.  
-  “{{extra_flavor}} pairs very well. Add it for {{defaultFlavorPriceAED}} dirham?”
+**IMPORTANT: No extra flavors beyond the scoop count are allowed. Do NOT offer paid flavors.**
 
 If they say no:
-“No problem.”
+"No problem."
 
 ### 4. When flavors are truly complete:
-- If toppings exist for the item → Immediately proceed to toppings.
+- If product allows toppings → proceed to toppings.
 
 ---
 
-## STEP C - TOPPING SELECTION (MANDATORY WHEN AVAILABLE)
+## STEP C - TOPPING SELECTION (PRODUCT-SPECIFIC RULES)
 
-After flavors are done:
-- MUST open toppings board:
-  `list_menu(kind="toppings", product_id=...)`
-- Say:
-  "You have {{free_topping_allowance}} free topping{{plural}}. Which topping would you like to add first?"
-  Always state the free topping allowance from the product (e.g., includedToppings) and call it free.
+### For CUPS (Ice Cream Cups):
+- Cups have NO free toppings.
+- Cups can add up to 2 toppings at cost (5 AED each).
+- Ask: "Would you like to add any toppings? You can add up to two for five dirham each."
+- If they want toppings, open the topping board and let them choose (max 2).
+- If they decline, proceed to cart.
+
+### For SUNDAES (Sundae Cups):
+- Sundaes include {{includedToppings}} free toppings.
+- NO extra toppings beyond the included ones.
+- MUST open toppings board: `list_menu(kind="toppings", product_id=...)`
+- Say: "You have {{free_topping_allowance}} free toppings included. Which toppings would you like?"
+
+### For MILKSHAKES:
+- **Signature Shakes** (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure):
+  - NO flavor selection (pre-defined flavors).
+  - NO toppings allowed.
+  - Skip flavor and topping steps entirely → go directly to cart.
+
+- **Make Your Own Shake**:
+  - MUST choose exactly 3 flavors.
+  - NO extra flavors beyond 3.
+  - NO toppings allowed.
+  - After 3 flavors are selected → go directly to cart.
 
 ### When topping is given:
 - Merge topping with previous toppings.
 - `choose_toppings` with FULL list.
 - Refresh detail card.
-- Announce:
-  - free toppings included,
-  - how many used,
-  - how many remain.
+- Announce how many free toppings used and remaining.
 
-### If free toppings remain:
-“Would you like to add another free topping?”
+### TOPPING UPSELL (Sundaes only):
+- **If free slots remain:** suggest complimentary topping.
+- **If free slots are full:** suggest a no-cost swap only.
+  "If you'd like, we can swap {{topping}} for {{better_topping}} at no extra cost."
 
-#### On YES:
-- MUST show topping menu again if not visible.
-- Ask for the topping.
-- Add it (merge), refresh, announce.
+**IMPORTANT: Sundaes cannot add extra toppings beyond the included ones. Milkshakes do not allow any toppings.**
 
-### Required Sundae Upgrade Upsell (Cup Only)
-If the product is an Ice Cream Cup and user wants paid toppings:
-“Since you are adding toppings, a Sundae Cup often gives better value because toppings are included. Would you like to switch to a Sundae Cup instead?”
-
----
-
-## REQUIRED TOPPING UPSELL (RUN AFTER EVERY TOPPING UPDATE)
-- If free topping slots remain → suggest complimentary topping.
-- If full → suggest a no-cost swap.
-- After swap decline → suggest a charged topping.
-
-“{{suggestion}} would go wonderfully with what you've chosen. Shall I add it?”
-
-All upsells (flavor, topping, upgrades, cart add-ons) are suggestions only. Ask for explicit yes before applying or changing any selection; if they decline, leave the order as-is and continue.
+All upsells (flavor, topping, cart add-ons) are suggestions only. Ask for explicit yes before applying or changing any selection; if they decline, leave the order as-is and continue.
 
 ---
 
@@ -404,12 +404,14 @@ If they accept:
 - Add to cart.
 If they decline: keep the cart unchanged and continue.
 
-# UPSSELL EXECUTION RULES (GLOBAL)
-- Upsells (flavors, toppings, upgrades, cart add-ons) are suggestions only.
+# UPSELL EXECUTION RULES (GLOBAL)
+- Upsells (flavors, toppings, cart add-ons) are suggestions only.
 - Always ask for an explicit yes before applying; never auto-add or auto-swap.
 - If declined, keep the current selection and proceed.
-- Use the tool-returned hints/suggestions (flavorUpsellSuggestion, toppingUpsellSuggestion, upgradeHint/Overlay, cartUpsellSuggestion) to phrase offers.
-- After a flavors/toppings update, speak at least one upsell sentence before moving to the next major phase (toppings or cart).
+- **Flavor upsells:** If slots are full, only offer swaps (no paid extras).
+- **Sundae topping upsells:** If slots are full, only offer swaps (no extra toppings).
+- **Cup topping upsells:** Cups can have max 2 toppings total at cost.
+- Use the tool-returned hints/suggestions to phrase offers.
 
 ---
 
@@ -455,11 +457,12 @@ Clarify missing parts only, then continue.
 # THICK SHAKE RULES (STRICT)
 - Signature shakes (Chocolate Chiller, Strawberry Mania, Jamoca Fudge, Praline Pleasure)  
   → NEVER use flavor picker  
-  → ONLY toppings allowed  
-  → toppings always charged  
+  → NO toppings allowed  
+  → Go directly to cart after selection  
 - Make Your Own Thick Shake  
-  → MUST ask for exactly 3 flavors  
-  → toppings optional and charged  
+  → MUST ask for exactly 3 flavors (no more, no less)  
+  → NO toppings allowed  
+  → After 3 flavors, go directly to cart  
 
 ---
 
@@ -501,14 +504,30 @@ The following summary describes the latest UI overlays and RPC calls for this co
 # [Keep SCOOP_KB exactly as in Code 1, with small cleanups]
 SCOOP_KB: Dict[str, Any] = {
     "toppings_policy": {
-        "extraToppingsCharged": "yes",
+        "cups": {
+            "includedToppings": 0,
+            "maxToppings": 2,
+            "note": "Cups have no free toppings. Can add up to 2 toppings at cost.",
+        },
+        "sundaes": {
+            "allowExtraToppings": False,
+            "note": "Sundaes only get their included free toppings. No extra toppings allowed.",
+        },
+        "milkshakes": {
+            "makeYourOwn": {
+                "allowToppings": False,
+                "note": "Make Your Own Shake does not allow toppings.",
+            },
+            "signature": {
+                "allowToppings": False,
+                "note": "Signature shakes do not allow toppings.",
+            },
+        },
         "extraToppingPriceAED": 5.0,
-        "note": "Extra toppings are charged per topping unless included by the item/size. Milkshakes can take unlimited toppings; each topping is charged according to its own priceAED.",
     },
     "flavor_policy": {
-        "extraFlavorsCharged": "yes",
-        "defaultFlavorPriceAED": 1.0,
-        "note": "Items include free flavors equal to their scoop count. Additional flavors beyond that number are charged per flavor.",
+        "allowExtraFlavors": False,
+        "note": "Customers can only choose flavors equal to the scoop count. No extra flavors allowed.",
     },
     "image_defaults": {
         "square": "https://dummyimage.com/200x200/efefef/222222&text=Image",
@@ -540,7 +559,6 @@ SCOOP_KB: Dict[str, Any] = {
         "cup_double_emlaaq",
         "cup_triple_kids",
         "cup_triple_value",
-        "cup_triple_emlaaq",
         "sundae_single_kids",
         "sundae_single_value",
         "sundae_single_emlaaq",
@@ -549,7 +567,6 @@ SCOOP_KB: Dict[str, Any] = {
         "sundae_double_emlaaq",
         "sundae_triple_kids",
         "sundae_triple_value",
-        "sundae_triple_emlaaq",
         "shake_chocolate_chiller_regular",
         "shake_chocolate_chiller_large",
         "shake_strawberry_mania_regular",
@@ -568,6 +585,8 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Kids",
             "scoops": 1,
             "priceAED": 12,
+            "includedToppings": 0,
+            "maxToppings": 2,
             "description": "One scoop in a kid-sized cup.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/wwweif79_0.jpg",
             "display": "Ice Cream Bar",
@@ -579,6 +598,8 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Value",
             "scoops": 1,
             "priceAED": 16,
+            "includedToppings": 0,
+            "maxToppings": 2,
             "description": "One full scoop in a value-sized cup.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/7ysjfilv_0.jpg",
             "display": "Ice Cream Bar",
@@ -590,6 +611,8 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Emlaaq",
             "scoops": 1,
             "priceAED": 20,
+            "includedToppings": 0,
+            "maxToppings": 2,
             "description": "One generous Emlaaq scoop.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/ceeoxr60_0.jpg",
             "display": "Ice Cream Bar",
@@ -601,6 +624,8 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Kids",
             "scoops": 2,
             "priceAED": 21,
+            "includedToppings": 0,
+            "maxToppings": 2,
             "description": "Two kid-sized scoops.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/pk1npics_0.jpg",
             "display": "Ice Cream Bar",
@@ -612,6 +637,8 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Value",
             "scoops": 2,
             "priceAED": 28,
+            "includedToppings": 0,
+            "maxToppings": 2,
             "description": "Two value scoops — mix flavors freely.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/bw2cs7ou_0.jpg",
             "display": "Ice Cream Bar",
@@ -623,6 +650,8 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Emlaaq",
             "scoops": 2,
             "priceAED": 37,
+            "includedToppings": 0,
+            "maxToppings": 2,
             "description": "Two large Emlaaq scoops.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8jj0qlin_0.jpg",
             "display": "Ice Cream Bar",
@@ -634,6 +663,8 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Kids",
             "scoops": 3,
             "priceAED": 30,
+            "includedToppings": 0,
+            "maxToppings": 2,
             "description": "Three kid-sized scoops.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/bd4a3wvg_0.jpg",
             "display": "Ice Cream Bar",
@@ -644,19 +675,10 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Cups",
             "size": "Value",
             "scoops": 3,
-            "priceAED": 35,
-            "description": "Three classic scoops — mix & match.",
-            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i4cehyc6_0.jpg",
-            "display": "Ice Cream Bar",
-        },
-        "cup_triple_emlaaq": {
-            "id": "cup_triple_emlaaq",
-            "name": "Triple Scoops Cup — Emlaaq",
-            "category": "Cups",
-            "size": "Emlaaq",
-            "scoops": 3,
             "priceAED": 40,
-            "description": "Three large Emlaaq scoops.",
+            "includedToppings": 0,
+            "maxToppings": 2,
+            "description": "Three classic scoops — mix & match.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i4cehyc6_0.jpg",
             "display": "Ice Cream Bar",
         },
@@ -666,8 +688,9 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Sundae Cups",
             "size": "Kids",
             "scoops": 1,
-            "priceAED": 18,
+            "priceAED": 16,
             "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Kids sundae with sauces & basic toppings.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/qwwyrap1_0.jpg",
             "display": "Sundae Counter",
@@ -678,8 +701,9 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Sundae Cups",
             "size": "Value",
             "scoops": 1,
-            "priceAED": 22,
+            "priceAED": 20,
             "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Value sundae with sauce and toppings.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i36szhpa_0.jpg",
             "display": "Sundae Counter",
@@ -690,8 +714,9 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Sundae Cups",
             "size": "Emlaaq",
             "scoops": 1,
-            "priceAED": 28,
-            "includedToppings": 3,
+            "priceAED": 24,
+            "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Emlaaq sundae with extra toppings.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8d6mjr6e_0.jpg",
             "display": "Sundae Counter",
@@ -704,6 +729,7 @@ SCOOP_KB: Dict[str, Any] = {
             "scoops": 2,
             "priceAED": 25,
             "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Two-scoop kids sundae.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/su3lvwpc_0.jpg",
             "display": "Sundae Counter",
@@ -714,8 +740,9 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Sundae Cups",
             "size": "Value",
             "scoops": 2,
-            "priceAED": 30,
+            "priceAED": 31,
             "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Two-scoop value sundae.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/hp4r5kzc_0.jpg",
             "display": "Sundae Counter",
@@ -726,8 +753,9 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Sundae Cups",
             "size": "Emlaaq",
             "scoops": 2,
-            "priceAED": 35,
+            "priceAED": 40,
             "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Two-scoop Emlaaq sundae.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/8d6mjr6e_0.jpg",
             "display": "Sundae Counter",
@@ -738,8 +766,9 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Sundae Cups",
             "size": "Kids",
             "scoops": 3,
-            "priceAED": 30,
+            "priceAED": 36,
             "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Three-scoop kids sundae.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
             "display": "Sundae Counter",
@@ -750,21 +779,10 @@ SCOOP_KB: Dict[str, Any] = {
             "category": "Sundae Cups",
             "size": "Value",
             "scoops": 3,
-            "priceAED": 35,
+            "priceAED": 44,
             "includedToppings": 2,
+            "allowExtraToppings": False,
             "description": "Three-scoop value sundae.",
-            "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
-            "display": "Sundae Counter",
-        },
-        "sundae_triple_emlaaq": {
-            "id": "sundae_triple_emlaaq",
-            "name": "Triple Sundae — Emlaaq",
-            "category": "Sundae Cups",
-            "size": "Emlaaq",
-            "scoops": 3,
-            "priceAED": 40,
-            "includedToppings": 2,
-            "description": "Three-scoop Emlaaq sundae.",
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/l64p228m_0.jpg",
             "display": "Sundae Counter",
         },
@@ -795,9 +813,10 @@ SCOOP_KB: Dict[str, Any] = {
             "name": "Strawberry Mania Thick Shake - Regular",
             "category": "Milk Shakes",
             "size": "Regular",
-            "priceAED": 27,
+            "priceAED": 25,
             "description": "Vanilla and very berry strawberry ice cream with banana pieces.",
             "allowFlavorSelection": False,
+            "allowToppings": False,
             "imageUrl": "https://f.nooncdn.com/food_production/food/menu/M8654550136017771626691016A/i1yr0rqp_0.jpg",
             "display": "Milkshake Bar",
         },
@@ -863,8 +882,9 @@ SCOOP_KB: Dict[str, Any] = {
             "size": "Regular",
             "scoops": 3,
             "priceAED": 25,
-            "description": "Choose 3 flavors each with 2.5 ounce per scoop + unlimited toppings (charged).",
+            "description": "Choose 3 flavors (no extras, no toppings).",
             "allowFlavorSelection": True,
+            "allowToppings": False,
             "allowedFlavorNames": [
                 "Chocolate",
                 "Chocolate Chip",
@@ -1031,11 +1051,11 @@ SCOOP_KB: Dict[str, Any] = {
             "available": "yes",
         },
         {
-            "id": "flv_sugarless",
-            "name": "SugarLess",
-            "classification": "sugarless",
-            "imageUrl": None,
-            "available": "no",
+            "id": "flv_cup_of_cocoa_tub",
+            "name": "Cup of cocoa Tub",
+            "classification": "choco",
+            "imageUrl": "https://www.baskinrobbinsmea.com/wp-content/uploads/2020/05/Chocolate.jpg",
+            "available": "yes",
         },
     ],
     "toppings": [
@@ -1181,15 +1201,25 @@ class AgentConfig:
         )
         # --- CHANGED: Keys for new pipeline ---
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
-        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-2024-11-20")
+        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini-2025-04-14")
+        
+        # COMMENTED OUT: Google Gemini configuration
+        # self.google_api_key = os.getenv("GOOGLE_API_KEY", "")
+        # self.google_model = os.getenv("GOOGLE_MODEL", "gemini-3-flash-preview")
+        
         self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
         self.cartesia_api_key = os.getenv("CARTESIA_API_KEY", "")
         self.cartesia_voice_id = os.getenv(
             "CARTESIA_VOICE_ID", "829ccd10-f8b3-43cd-b8a0-4aeaa81f3b30"
         )
 
-        self.anam_api_key = os.getenv("ANAM_API_KEY", "")
-        self.anam_avatar_id = os.getenv("ANAM_AVATAR_ID", "")
+        # COMMENTED OUT: Anam configuration (switched to Simli)
+        # self.anam_api_key = os.getenv("ANAM_API_KEY", "")
+        # self.anam_avatar_id = os.getenv("ANAM_AVATAR_ID", "")
+        
+        # Simli configuration
+        self.simli_api_key = os.getenv("SIMLI_API_KEY", "")
+        self.simli_face_id = os.getenv("SIMLI_FACE_ID", "cace3ef7-a4c4-425d-a8cf-a5358eb0c427")
         self._validate()
 
     def _validate(self) -> None:
@@ -1197,10 +1227,14 @@ class AgentConfig:
             "LIVEKIT_API_KEY": self.livekit_api_key,
             "LIVEKIT_API_SECRET": self.livekit_api_secret,
             "OPENAI_API_KEY": self.openai_api_key,
+            # COMMENTED OUT: Google Gemini validation
+            # "GOOGLE_API_KEY": self.google_api_key,
             "DEEPGRAM_API_KEY": self.deepgram_api_key,
             "CARTESIA_API_KEY": self.cartesia_api_key,
-            "ANAM_API_KEY": self.anam_api_key,
-            "ANAM_AVATAR_ID": self.anam_avatar_id,
+            # COMMENTED OUT: Anam validation (switched to Simli)
+            # "ANAM_API_KEY": self.anam_api_key,
+            # "ANAM_AVATAR_ID": self.anam_avatar_id,
+            "SIMLI_API_KEY": self.simli_api_key,
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
@@ -1219,7 +1253,7 @@ class AgentConfig:
         return {
             "role": "agent",
             "agentName": self.agent_name,
-            "avatarId": self.anam_avatar_id,
+            "avatarId": self.simli_face_id,  # Changed from anam_avatar_id to simli_face_id
             "agentType": "avatar",
             "agentIdentity": agent_identity,
         }
@@ -2633,6 +2667,12 @@ async def entrypoint(ctx: JobContext) -> None:
         model=config.openai_model,
         api_key=config.openai_api_key,
     )
+    
+    # COMMENTED OUT: Google Gemini LLM
+    # llm = lk_google.LLM(
+    #     model=config.google_model,
+    #     api_key=config.google_api_key,
+    # )
     tts = cartesia.TTS(
         model="sonic-3",
         voice=config.cartesia_voice_id,
@@ -2646,15 +2686,24 @@ async def entrypoint(ctx: JobContext) -> None:
         tts=tts,
     )
 
-    # Avatar Session
-    avatar_session = anam_avatar.AvatarSession(
-        persona_config=anam_avatar.PersonaConfig(
-            name=config.agent_name,
-            avatarId=config.anam_avatar_id,
+    # COMMENTED OUT: Anam Avatar Session (switched to Simli)
+    # avatar_session = anam_avatar.AvatarSession(
+    #     persona_config=anam_avatar.PersonaConfig(
+    #         name=config.agent_name,
+    #         avatarId=config.anam_avatar_id,
+    #     ),
+    #     api_key=config.anam_api_key,
+    #     avatar_participant_name=config.agent_name,
+    #     avatar_participant_identity=agent_identity,
+    # )
+
+    # Simli Avatar Session
+    avatar_session = simli.AvatarSession(
+        simli_config=simli.SimliConfig(
+            api_key=config.simli_api_key,
+            face_id=config.simli_face_id,
         ),
-        api_key=config.anam_api_key,
         avatar_participant_name=config.agent_name,
-        avatar_participant_identity=agent_identity,
     )
 
     # State & Tools (Code 1 Style)
