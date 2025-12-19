@@ -471,6 +471,11 @@ If more items wanted:
 - Continue browsing or Quick Order.
 
 If done:
+- Calculate and announce the final total with 5% tax:
+  - Subtotal = sum of all cart items
+  - Tax = Subtotal × 0.05 (5%)
+  - Total = Subtotal + Tax
+  - Say: "Your subtotal is {{subtotal}} dirham. With 5% tax of {{tax}} dirham, your total comes to {{total}} dirham."
 - Call `get_directions` to the correct counter.
 - “Please proceed to the counter to collect your order. Enjoy your treat!”
 
@@ -528,6 +533,11 @@ SCOOP_KB: Dict[str, Any] = {
     "flavor_policy": {
         "allowExtraFlavors": False,
         "note": "Customers can only choose flavors equal to the scoop count. No extra flavors allowed.",
+    },
+    "tax_policy": {
+        "taxRate": 0.05,
+        "taxPercentage": 5,
+        "note": "5% tax is applied to the order subtotal. Example: 50 AED subtotal → 2.5 AED tax → 52.5 AED total.",
     },
     "image_defaults": {
         "square": "https://dummyimage.com/200x200/efefef/222222&text=Image",
