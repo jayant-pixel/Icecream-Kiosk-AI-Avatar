@@ -547,17 +547,17 @@ SCOOP_KB: Dict[str, Any] = {
         "Ice Cream Bar": {
             "displayName": "Ice Cream Bar",
             "hint": "You’ll find your cup ice creams being scooped here.",
-            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg",
+            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1766382103/Gemini_Generated_Image_zfr9xazfr9xazfr9_bneyj3.png",
         },
         "Sundae Counter": {
             "displayName": "Sundae Counter",
             "hint": "This is where all Sundae Cups are prepared and topped.",
-            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg",
+            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1766382103/Gemini_Generated_Image_zfr9xazfr9xazfr9_bneyj3.png",
         },
         "Milkshake Bar": {
             "displayName": "Milkshake Bar",
             "hint": "Shakes are blended fresh right here.",
-            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1763290020/Cake_Shop_Interior_qeffkb.jpg",
+            "mapImage": "https://res.cloudinary.com/dslutbftw/image/upload/v1766382122/Gemini_Generated_Image_vkk0qxvkk0qxvkk0_s50m1h.png",
         },
     },
     "product_order": [
