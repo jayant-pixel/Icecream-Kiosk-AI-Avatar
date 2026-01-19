@@ -6,7 +6,7 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace frontend",
+    "dev": "cd frontend && npx cross-env NEXT_DISABLE_TURBOPACK=1 next dev",
     "build": "npm run build --workspace frontend",
     "start": "npm run start --workspace frontend",
     "lint": "npm run lint --workspace frontend",

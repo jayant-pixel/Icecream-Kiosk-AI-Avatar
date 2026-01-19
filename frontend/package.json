@@ -1,6 +1,6 @@
 {
-  "name": "livekit-meet-agents",
-  "version": "0.1.0",
+  "name": "icecream-kiosk-frontend",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "cross-env NEXT_DISABLE_TURBOPACK=1 next dev",

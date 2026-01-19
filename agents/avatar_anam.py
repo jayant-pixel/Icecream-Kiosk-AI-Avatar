@@ -47,6 +47,31 @@ logger = logging.getLogger("baskin-avatar-agent")
 logger.setLevel(logging.INFO)
 load_dotenv(dotenv_path=Path(__file__).resolve().with_name(".env"))
 
+# =========================
+# Environment Validation
+# =========================
+REQUIRED_ENV_VARS = [
+    "LIVEKIT_URL",
+    "LIVEKIT_API_KEY", 
+    "LIVEKIT_API_SECRET",
+    "OPENAI_API_KEY",
+    "DEEPGRAM_API_KEY",
+    "CARTESIA_API_KEY",
+    "SIMLI_API_KEY",
+]
+
+def validate_environment() -> None:
+    """Validate required environment variables at startup."""
+    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing:
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(missing)}. "
+            f"Please check your .env file."
+        )
+
+# Validate on import
+validate_environment()
+
 OVERLAY_TOPIC = "ui.overlay"
 CATEGORY_FALLBACK = "Highlights"
 

@@ -28,10 +28,15 @@ export async function POST(request: NextRequest) {
     }
 
     const roomName = room;
-    const agentName =
-      process.env.NEXT_PUBLIC_AGENT_NAME ||
-      process.env.LIVEKIT_AGENT_NAME ||
-      "baskin-avatar";
+    const agentName = process.env.NEXT_PUBLIC_AGENT_NAME;
+
+    if (!agentName) {
+      console.error("NEXT_PUBLIC_AGENT_NAME environment variable is required");
+      return NextResponse.json(
+        { error: "Agent name not configured" },
+        { status: 500 }
+      );
+    }
 
     const agentDispatchClient = new AgentDispatchClient(
       LIVEKIT_URL,
