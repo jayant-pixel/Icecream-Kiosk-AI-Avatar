@@ -18,6 +18,7 @@ export async function GET(request: NextRequest) {
     const roomName = request.nextUrl.searchParams.get("roomName");
     const participantName = request.nextUrl.searchParams.get("participantName");
     const metadata = request.nextUrl.searchParams.get("metadata") ?? "";
+    const language = request.nextUrl.searchParams.get("language") ?? "english";
     const region = request.nextUrl.searchParams.get("region");
     const livekitServerUrl = region ? getLiveKitURL(region) : LIVEKIT_URL;
     let randomParticipantPostfix = request.cookies.get(COOKIE_KEY)?.value;
@@ -37,6 +38,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Build participant metadata with language
+    const participantMetadata = metadata
+      ? JSON.stringify({ ...JSON.parse(metadata), language })
+      : JSON.stringify({ language });
+
     // Generate participant token
     if (!randomParticipantPostfix) {
       randomParticipantPostfix = randomString(4);
@@ -45,7 +51,7 @@ export async function GET(request: NextRequest) {
       {
         identity: `${participantName}__${randomParticipantPostfix}`,
         name: participantName,
-        metadata,
+        metadata: participantMetadata,
       },
       roomName
     );

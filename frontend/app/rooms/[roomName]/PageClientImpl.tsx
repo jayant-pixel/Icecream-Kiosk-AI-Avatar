@@ -32,6 +32,7 @@ export function PageClientImpl(props: {
   region?: string;
   hq: boolean;
   codec: string;
+  language?: string;
 }) {
   const [connectionDetails, setConnectionDetails] = React.useState<
     ConnectionDetails | null
@@ -42,6 +43,7 @@ export function PageClientImpl(props: {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const identityRef = React.useRef<string | null>(null);
+  const selectedLanguage = props.language || "english";
 
   React.useEffect(() => {
     let cancelled = false;
@@ -57,6 +59,9 @@ export function PageClientImpl(props: {
         if (props.region) {
           url.searchParams.append("region", props.region);
         }
+        // Pass language as metadata for the participant token
+        url.searchParams.append("language", selectedLanguage);
+
         const response = await fetch(url.toString());
         if (!response.ok) {
           throw new Error("Unable to prepare LiveKit connection");
@@ -73,11 +78,14 @@ export function PageClientImpl(props: {
           videoDeviceId: "",
         });
 
-        // Ensure Scoop avatar is dispatched (idempotent).
+        // Ensure Scoop avatar is dispatched (idempotent) with language.
         fetch("/api/livekit/request-agent", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ room: props.roomName }),
+          body: JSON.stringify({
+            room: props.roomName,
+            language: selectedLanguage,
+          }),
         }).catch((err) => {
           console.warn("Failed to ensure agent dispatch", err);
         });
@@ -98,7 +106,7 @@ export function PageClientImpl(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.roomName, props.region]);
+  }, [props.roomName, props.region, selectedLanguage]);
 
   const router = useRouter();
   const handleOnLeave = React.useCallback(async () => {
@@ -146,7 +154,7 @@ export function PageClientImpl(props: {
         <div className="max-w-md space-y-4">
           <h2 className="text-2xl font-semibold">Something went wrong</h2>
           <p className="text-base opacity-80">
-            {error ?? "We couldn’t prepare the session. Please try again."}
+            {error ?? "We couldn't prepare the session. Please try again."}
           </p>
           <button
             type="button"

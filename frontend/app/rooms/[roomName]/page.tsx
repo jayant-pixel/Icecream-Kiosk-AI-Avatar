@@ -8,14 +8,14 @@ export default async function Page({
 }: {
   params: Promise<{ roomName: string }>;
   searchParams: Promise<{
-    // FIXME: We should not allow values for regions if in playground mode.
     region?: string;
     hq?: string;
     codec?: string;
+    lang?: string;
   }>;
 }) {
   const { roomName } = await params;
-  const { region, hq, codec } = await searchParams;
+  const { region, hq, codec, lang } = await searchParams;
 
   return (
     <PageClientImpl
@@ -23,6 +23,7 @@ export default async function Page({
       region={region}
       hq={hq === "true" ? true : false}
       codec={typeof codec === "string" && isVideoCodec(codec) ? codec : "vp9"}
+      language={lang === "arabic" ? "arabic" : "english"}
     />
   );
 }

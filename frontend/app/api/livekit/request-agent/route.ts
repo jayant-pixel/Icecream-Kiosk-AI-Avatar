@@ -9,7 +9,7 @@ const AGENT_METADATA = { requestedBy: "meet-app" };
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { room } = body ?? {};
+    const { room, language } = body ?? {};
 
     if (!room || typeof room !== "string") {
       return NextResponse.json(
@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
     }
 
     const roomName = room;
+    const selectedLanguage = typeof language === "string" ? language : "english";
     const agentName = process.env.NEXT_PUBLIC_AGENT_NAME;
 
     if (!agentName) {
@@ -49,7 +50,9 @@ export async function POST(request: NextRequest) {
       LIVEKIT_API_SECRET
     );
 
-    await ensureRoomExists(roomServiceClient, roomName);
+    // Create room with language metadata so the agent can read it
+    const roomMetadata = JSON.stringify({ language: selectedLanguage });
+    await ensureRoomExists(roomServiceClient, roomName, roomMetadata);
 
     const dispatches = await agentDispatchClient.listDispatch(roomName);
     const existingDispatch = dispatches.find((dispatch) => {
@@ -83,11 +86,17 @@ export async function POST(request: NextRequest) {
 
 async function ensureRoomExists(
   client: RoomServiceClient,
-  roomName: string
+  roomName: string,
+  metadata?: string
 ): Promise<void> {
   try {
     const rooms = await client.listRooms([roomName]);
-    if (rooms.some((room) => room.name === roomName)) {
+    const existingRoom = rooms.find((room) => room.name === roomName);
+    if (existingRoom) {
+      // Update room metadata with language if room already exists
+      if (metadata) {
+        await client.updateRoomMetadata(roomName, metadata);
+      }
       return;
     }
   } catch (err) {
@@ -98,11 +107,19 @@ async function ensureRoomExists(
   }
 
   try {
-    await client.createRoom({ name: roomName });
+    await client.createRoom({ name: roomName, metadata });
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code !== "already_exists") {
       throw err;
+    }
+    // Room was just created by someone else, try updating metadata
+    if (metadata) {
+      try {
+        await client.updateRoomMetadata(roomName, metadata);
+      } catch {
+        // Best effort
+      }
     }
   }
 }

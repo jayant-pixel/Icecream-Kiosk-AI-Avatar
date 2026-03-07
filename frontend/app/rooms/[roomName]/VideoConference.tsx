@@ -1,9 +1,10 @@
+"use client";
+
 import { isTrackReference } from "@livekit/components-core";
 import {
   ConnectionStateToast,
   RoomAudioRenderer,
   useDataChannel,
-  useRoomContext,
   useTracks,
   VideoTrack,
 } from "@livekit/components-react";
@@ -11,9 +12,12 @@ import { Track } from "livekit-client";
 import * as React from "react";
 import { ControlBar } from "./ControlBar";
 import { OverlayLayer } from "./OverlayLayer";
+
+// NOTE: ProductShowcase is kept for the UI chrome (menu grid / detail card /
+// "added" toast) it renders, but its RPC handler (client.products) was dead —
+// the agent never calls that method. If you want to remove ProductShowcase
+// entirely, delete the import and the <ProductShowcase> element below.
 import { ProductShowcase } from "./ProductShowcase";
-import type { RpcInvocationData } from "livekit-client";
-import type { DirectionsPayload } from "./ProductShowcase";
 
 export function VideoConference({
   ...props
@@ -23,47 +27,30 @@ export function VideoConference({
     { onlySubscribed: false }
   );
 
-  const avatarTrack = React.useMemo(() => {
-    return tracks
-      .filter(isTrackReference)
-      .find(
-        (track) =>
-          track.participant?.attributes?.agentType === "avatar" ||
-          track.participant?.identity?.includes("avatar")
-      );
-  }, [tracks]);
+  const avatarTrack = React.useMemo(
+    () =>
+      tracks
+        .filter(isTrackReference)
+        .find(
+          (t) =>
+            t.participant?.attributes?.agentType === "avatar" ||
+            t.participant?.identity?.includes("avatar")
+        ),
+    [tracks]
+  );
 
-  const room = useRoomContext();
-  const [rpcDirections, setRpcDirections] = React.useState<DirectionsPayload | null>(null);
-
-  React.useEffect(() => {
-    if (!room) return;
-
-    const handleDirectionsRpc = async (data: RpcInvocationData): Promise<string> => {
-      try {
-        const payloadRaw =
-          typeof data?.payload === "string" ? data.payload : JSON.stringify(data?.payload ?? {});
-        const payload = JSON.parse(payloadRaw) as DirectionsPayload;
-        setRpcDirections(payload);
-        return "ok";
-      } catch (error) {
-        console.error("Error handling directions RPC", error);
-        return "error";
-      }
-    };
-
-    room.registerRpcMethod("client.directions", handleDirectionsRpc);
-    return () => {
-      room.unregisterRpcMethod("client.directions");
-    };
-  }, [room]);
-
+  // Suppress LiveKit's internal transcription channel from cluttering the console.
   useDataChannel(
     "lk.transcription",
     React.useCallback(() => {
-      /* ignore LiveKit transcription payloads to avoid noisy console warnings */
+      /* intentionally ignored */
     }, [])
   );
+
+  // All RPC registration (client.directions, client.cartUpdated, etc.) now lives
+  // inside OverlayLayer. VideoConference no longer touches RPC or room directly,
+  // which eliminates the duplicate client.directions registration that previously
+  // caused the directions panel to silently fail.
 
   return (
     <div
@@ -75,7 +62,7 @@ export function VideoConference({
           <div className="absolute inset-0 flex overflow-hidden items-start justify-center bg-black">
             <VideoTrack
               className="h-full w-auto object-cover"
-              style={{ filter: 'contrast(1.1) saturate(1.2)' }}
+              style={{ filter: "contrast(1.1) saturate(1.2)" }}
               trackRef={avatarTrack}
             />
           </div>
@@ -91,18 +78,36 @@ export function VideoConference({
             </div>
           </div>
         )}
-        <OverlayLayer rpcDirections={rpcDirections} />
+
+        {/*
+         * OverlayLayer is the single authoritative UI consumer. It owns:
+         *   - product grid / detail cards (data channel + client.menuLoaded RPC)
+         *   - flavor & topping pickers (data channel + client.flavors/toppingsLoaded RPC)
+         *   - cart panel (data channel + client.cartUpdated RPC)
+         *   - directions panel (data channel + client.directions RPC)
+         *   - upgrade banner (data channel)
+         *
+         * No prop threading required — all channels are handled internally.
+         */}
+        <OverlayLayer />
+
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-end px-3 pb-6 sm:px-4 lg:px-10">
           <div className="pointer-events-auto flex w-full max-w-6xl flex-col items-center gap-4">
-            <ProductShowcase className="w-full" directions={rpcDirections} />
+            {/* ProductShowcase renders the menu-grid / detail / added-to-tray panels.
+                Its internal client.products RPC handler is dead (agent never calls it),
+                so these panels are only visible if this agent is updated to send that RPC.
+                Safe to remove if you no longer need this panel. */}
+            <ProductShowcase className="w-full" />
           </div>
         </div>
       </div>
+
       <div className="absolute inset-x-0 bottom-0 flex justify-center px-4 pb-6 sm:pb-10 pointer-events-none">
         <div className="pointer-events-auto">
           <ControlBar />
         </div>
       </div>
+
       <RoomAudioRenderer />
       <ConnectionStateToast />
     </div>
