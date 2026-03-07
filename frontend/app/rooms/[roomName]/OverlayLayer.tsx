@@ -3,17 +3,10 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReceivedDataMessage } from "@livekit/components-core";
-import {
-  useDataChannel,
-  useRoomContext,
-  useVoiceAssistant,
-} from "@livekit/components-react";
+import { useDataChannel, useRoomContext, useVoiceAssistant } from "@livekit/components-react";
 import type { RpcInvocationData } from "livekit-client";
+import type { DirectionsPayload } from "./ProductShowcase";
 import clsx from "clsx";
-
-// ---------------------------------------------------------------------------
-// Types — kept in sync with the Python agent's output shapes
-// ---------------------------------------------------------------------------
 
 type ProductCard = {
   id?: string;
@@ -26,6 +19,7 @@ type ProductCard = {
   imageUrl?: string | null;
   display?: string | null;
   includedToppings?: number | null;
+  allowsFlavorSelection?: boolean;
   cakeBaseFlavor?: string | null;
   allowCakeMessage?: boolean;
 };
@@ -38,12 +32,14 @@ type ProductGridPayload = {
   query?: string | null;
   products?: ProductCard[];
   cartSummary?: CartSummary;
+  overlayId?: string;
 };
 
 type ProductDetailPayload = {
   kind: "products";
   view: "detail";
   product?: ProductCard;
+  products?: ProductCard[];
   selectedFlavors?: FlavorSelection[];
   selectedToppings?: ToppingSelection[];
   flavorSummary?: SummaryNote;
@@ -51,6 +47,7 @@ type ProductDetailPayload = {
   sizeOptions?: SizeOption[];
   contextProductId?: string;
   cartSummary?: CartSummary;
+  overlayId?: string;
 };
 
 type FlavorSelection = {
@@ -69,9 +66,16 @@ type ToppingSelection = {
   isFree?: boolean;
 };
 
-type SummaryNote = { label?: string; extraNote?: string | null };
+type SummaryNote = {
+  label?: string;
+  extraNote?: string | null;
+};
 
-type SizeOption = { id?: string; size?: string | null; priceAED?: number | null };
+type SizeOption = {
+  id?: string;
+  size?: string | null;
+  priceAED?: number | null;
+};
 
 type FlavorCatalogCard = {
   id?: string;
@@ -92,11 +96,13 @@ type FlavorOverlayPayload = {
   usedFreeFlavors?: number;
   extraFlavorCount?: number;
   flavors?: FlavorCatalogCard[];
+  overlayId?: string;
 };
 
 type ToppingCatalogCard = {
   id?: string;
   name?: string;
+  type?: "liquid" | "dry";
   priceAED?: number | null;
   imageUrl?: string | null;
 };
@@ -112,6 +118,7 @@ type ToppingOverlayPayload = {
   selectedToppingIds?: string[];
   selectedToppings?: ToppingSelection[];
   toppings?: ToppingCatalogCard[];
+  overlayId?: string;
 };
 
 type CartFlavor = {
@@ -142,6 +149,7 @@ type CartItem = {
   category?: string;
   size?: string | null;
   imageUrl?: string | null;
+  display?: string | null;
   qty?: number;
   flavors?: CartFlavor[];
   toppings?: CartTopping[];
@@ -151,23 +159,27 @@ type CartItem = {
   lineTotalAED?: number | null;
 };
 
-// IMPORTANT: agent sends `subTotalAED` (capital T). Keep this type aligned.
 type CartSummary = {
-  subTotalAED?: number | null;  // agent field name
+  subtotalAED?: number | null;
   taxAED?: number | null;
   totalAED?: number | null;
-};
-
-type CartPayload = {
-  items?: CartItem[];
-  subTotalAED?: number | null;
-  taxAED?: number | null;
-  totalAED?: number | null;
+  message?: string;
 };
 
 type CartOverlayPayload = {
   kind: "cart";
-  cart?: CartPayload;
+  cart?: {
+    items?: CartItem[];
+    subtotalAED?: number | null;
+    taxAED?: number | null;
+    totalAED?: number | null;
+    message?: string;
+  };
+  overlayId?: string;
+};
+
+type CartRpcPayload = {
+  cart?: CartOverlayPayload["cart"];
 };
 
 type DirectionLocation = {
@@ -177,11 +189,10 @@ type DirectionLocation = {
   products?: string[];
 };
 
-// Agent sends { action: "show", locations: [...] } via RPC and
-// { kind: "directions", locations: [...] } via data channel overlay.
 type DirectionsOverlayPayload = {
   kind: "directions";
   locations?: DirectionLocation[];
+  overlayId?: string;
 };
 
 type UpgradeOverlayPayload = {
@@ -196,94 +207,170 @@ type UpgradeOverlayPayload = {
     primaryCtaLabel?: string;
     secondaryCtaLabel?: string;
   };
+  overlayId?: string;
 };
 
+type ClearOverlayPayload = { kind: "clear"; overlayId?: string };
+
+type ProductsOverlayPayload = ProductGridPayload | ProductDetailPayload;
+
 type OverlayPayload =
-  | ProductGridPayload
-  | ProductDetailPayload
+  | ProductsOverlayPayload
   | FlavorOverlayPayload
   | ToppingOverlayPayload
   | CartOverlayPayload
   | DirectionsOverlayPayload
   | UpgradeOverlayPayload
-  | { kind: "clear" }
-  | { kind: string };
+  | ClearOverlayPayload
+  | { kind: string; overlayId?: string };
 
-type ActiveLayer = "products" | "flavors" | "toppings" | "cart" | "directions";
+type OverlayLayerKind = "products" | "flavors" | "toppings" | "cart" | "directions";
+
+type OverlayLayerProps = {
+  rpcDirections?: DirectionsPayload | null;
+};
+
 type CartIndicator = { count: number; total: number };
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 const decoder = new TextDecoder();
 const OVERLAY_TOPIC = "ui.overlay";
 const CATEGORY_OPTIONS = ["All", "Cups", "Sundae Cups", "Milk Shakes", "Cakes"];
 const FLAVOR_TABS = ["All", "Choco", "Berry", "Classics", "SugarLess"];
 
-// ---------------------------------------------------------------------------
-// OverlayLayer component
-// ---------------------------------------------------------------------------
+function parseRpcPayload<T>(data?: RpcInvocationData): T | null {
+  if (!data?.payload) {
+    return null;
+  }
+  try {
+    return JSON.parse(data.payload) as T;
+  } catch (error) {
+    console.error("Failed to parse RPC payload", error);
+    return null;
+  }
+}
 
-export function OverlayLayer() {
+/**
+ * UPDATED: use `payload.locations` (not `payload.directions`)
+ * and type each entry as DirectionLocation to avoid implicit any.
+ */
+const rpcDirectionsToLocations = (payload: DirectionsPayload): DirectionLocation[] => {
+  const entries: DirectionLocation[] =
+    "locations" in payload && Array.isArray(payload.locations)
+      ? (payload.locations as DirectionLocation[])
+      : [];
+
+  const displayFallback = payload.display ?? payload.displayName;
+  const normalized: DirectionLocation[] = entries.map((entry: DirectionLocation) => ({
+    displayName: entry.displayName ?? displayFallback,
+    hint: entry.hint ?? undefined,
+    mapImage: entry.mapImage ?? null,
+    products: entry.products,
+  }));
+
+  if (!normalized.length && displayFallback) {
+    normalized.push({ displayName: displayFallback });
+  }
+
+  return normalized;
+};
+
+export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
   const room = useRoomContext();
   const { agent } = useVoiceAssistant();
-
-  const [productPayload, setProductPayload] = useState<
-    ProductGridPayload | ProductDetailPayload | null
-  >(null);
+  const [productPayload, setProductPayload] = useState<ProductsOverlayPayload | null>(null);
   const [flavorPayload, setFlavorPayload] = useState<FlavorOverlayPayload | null>(null);
   const [toppingPayload, setToppingPayload] = useState<ToppingOverlayPayload | null>(null);
-  const [cartPayload, setCartPayload] = useState<CartPayload | null>(null);
+  const [cartPayload, setCartPayload] = useState<CartOverlayPayload | null>(null);
   const [directionsPayload, setDirectionsPayload] = useState<DirectionsOverlayPayload | null>(null);
   const [upgradePayload, setUpgradePayload] = useState<UpgradeOverlayPayload | null>(null);
-  const [activeLayer, setActiveLayer] = useState<ActiveLayer>("products");
+  const [activeLayer, setActiveLayer] = useState<OverlayLayerKind>("products");
   const [panelLayer, setPanelLayer] = useState<"flavors" | "toppings" | null>(null);
   const [cartIndicator, setCartIndicator] = useState<CartIndicator>({ count: 0, total: 0 });
   const [menuCache, setMenuCache] = useState<ProductGridPayload | null>(null);
 
-  // ── Overlay ack ─────────────────────────────────────────────────────────
   const sendOverlayAck = useCallback(
-    async (overlayKind: string) => {
-      if (!room || !agent?.identity) return;
-      const dest =
+    async ({
+      overlayId,
+      productId,
+      kind,
+      status = "shown",
+    }: {
+      overlayId?: string;
+      productId?: string;
+      kind?: string;
+      status?: string;
+    }) => {
+      if (!overlayId || !room || !agent?.identity) {
+        return;
+      }
+      const destinationIdentity =
         agent.attributes?.["agentControllerIdentity"] ??
         agent.attributes?.["agentcontrolleridentity"] ??
         agent.identity;
-      if (!dest) return;
+      if (!destinationIdentity) {
+        return;
+      }
       try {
         await room.localParticipant.performRpc({
-          destinationIdentity: dest,
+          destinationIdentity,
           method: "agent.overlayAck",
-          payload: JSON.stringify({ kind: overlayKind, status: "shown" }),
+          payload: JSON.stringify({
+            overlayId,
+            productId,
+            kind,
+            status,
+          }),
         });
-      } catch {
-        // best-effort — do not spam console on every overlay
+      } catch (error) {
+        console.warn("Failed to send overlay ack", error);
       }
     },
     [agent, room]
   );
 
-  // ── Core overlay message handler ─────────────────────────────────────────
+  const extractProductId = useCallback((payload: OverlayPayload): string | undefined => {
+    if ("contextProductId" in payload && payload.contextProductId) {
+      return payload.contextProductId;
+    }
+    if ("productId" in payload && payload.productId) {
+      return payload.productId;
+    }
+    if ("product" in payload && payload.product?.id) {
+      return payload.product.id;
+    }
+    if ("cart" in payload && payload.cart?.items?.length) {
+      const firstItem = payload.cart.items.find((item) => item.product_id);
+      if (firstItem?.product_id) {
+        return firstItem.product_id;
+      }
+    }
+    if (
+      "highlightedProductId" in payload &&
+      typeof payload.highlightedProductId === "string" &&
+      payload.highlightedProductId.length > 0
+    ) {
+      return payload.highlightedProductId;
+    }
+    return undefined;
+  }, []);
+
   const handleOverlayMessage = useCallback(
     (payload: OverlayPayload) => {
       switch (payload.kind) {
         case "products": {
-          const p = payload as ProductGridPayload | ProductDetailPayload;
-          setProductPayload(p);
+          const productsPayload = payload as ProductsOverlayPayload;
+          setProductPayload(productsPayload);
           setActiveLayer("products");
           setPanelLayer(null);
-          if (p.view === "grid") {
-            setMenuCache(p as ProductGridPayload);
+          if (productsPayload.view === "grid") {
+            setMenuCache(productsPayload as ProductGridPayload);
             setFlavorPayload(null);
             setToppingPayload(null);
             setUpgradePayload(null);
           }
-          const summary = p.cartSummary;
+          const summary = (productsPayload as ProductGridPayload | ProductDetailPayload).cartSummary;
           if (summary && typeof summary.totalAED === "number") {
-            setCartIndicator((prev) => ({
-              count: prev.count,
-              total: summary.totalAED ?? prev.total,
-            }));
+            setCartIndicator((prev) => ({ count: prev.count, total: summary.totalAED ?? prev.total }));
           }
           break;
         }
@@ -296,14 +383,13 @@ export function OverlayLayer() {
           setPanelLayer("toppings");
           break;
         case "cart": {
-          const cartData = (payload as CartOverlayPayload).cart ?? null;
+          const cartData = payload as CartOverlayPayload;
           setCartPayload(cartData);
           setActiveLayer("cart");
           setPanelLayer(null);
-          setCartIndicator({
-            count: cartData?.items?.length ?? 0,
-            total: cartData?.totalAED ?? 0,
-          });
+          const count = cartData.cart?.items?.length ?? 0;
+          const total = cartData.cart?.totalAED ?? 0;
+          setCartIndicator({ count, total });
           break;
         }
         case "directions":
@@ -325,20 +411,31 @@ export function OverlayLayer() {
         default:
           break;
       }
-      void sendOverlayAck(payload.kind);
+      const status = payload.kind === "clear" ? "cleared" : "shown";
+      void sendOverlayAck({
+        overlayId: payload.overlayId,
+        productId: extractProductId(payload),
+        kind: payload.kind,
+        status,
+      });
     },
-    [sendOverlayAck]
+    [extractProductId, sendOverlayAck]
   );
 
-  // ── Data-channel listener (raw overlay packets) ──────────────────────────
   const handleOverlayPacket = useCallback(
     (raw: Uint8Array) => {
       try {
-        const json = JSON.parse(decoder.decode(raw));
-        if (json?.type !== "ui.overlay" || !json.payload) return;
+        const decoded = decoder.decode(raw);
+        const json = JSON.parse(decoded);
+        if (json?.type !== "ui.overlay" || !json.payload) {
+          return;
+        }
+        if (process.env.NODE_ENV !== "production") {
+          console.debug("[overlay]", json.payload);
+        }
         handleOverlayMessage(json.payload as OverlayPayload);
-      } catch {
-        // ignore malformed packets
+      } catch (error) {
+        console.warn("Ignoring malformed overlay payload", error);
       }
     },
     [handleOverlayMessage]
@@ -348,85 +445,106 @@ export function OverlayLayer() {
     OVERLAY_TOPIC,
     useCallback(
       (msg: ReceivedDataMessage<typeof OVERLAY_TOPIC>) => {
-        if (msg?.payload) handleOverlayPacket(msg.payload);
+        if (msg?.payload) {
+          handleOverlayPacket(msg.payload);
+        }
       },
       [handleOverlayPacket]
     )
   );
 
-  // ── RPC handlers — all five methods registered in one place ──────────────
   useEffect(() => {
     if (!room) return;
 
-    // client.menuLoaded / client.flavorsLoaded / client.toppingsLoaded
-    // These are acknowledgement-only calls from the agent. We just return "ok".
-    const ackOk = async (): Promise<string> => "ok";
+    const handleMenuLoaded = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payload = parseRpcPayload<Record<string, unknown>>(data);
+        console.log("menuLoaded", payload);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling menuLoaded RPC", error);
+        return "error";
+      }
+    };
 
-    // client.cartUpdated — agent sends full cart payload
+    const handleFlavorsLoaded = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payload = parseRpcPayload<Record<string, unknown>>(data);
+        console.log("flavorsLoaded", payload);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling flavorsLoaded RPC", error);
+        return "error";
+      }
+    };
+
+    const handleToppingsLoaded = async (data: RpcInvocationData): Promise<string> => {
+      try {
+        const payload = parseRpcPayload<Record<string, unknown>>(data);
+        console.log("toppingsLoaded", payload);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling toppingsLoaded RPC", error);
+        return "error";
+      }
+    };
+
     const handleCartUpdated = async (data: RpcInvocationData): Promise<string> => {
       try {
-        const parsed = JSON.parse(data.payload ?? "{}") as { cart?: CartPayload };
-        if (parsed?.cart) {
-          setCartPayload(parsed.cart);
+        const payload = parseRpcPayload<CartRpcPayload>(data);
+        console.log("cartUpdated", payload);
+        if (payload?.cart) {
+          setCartPayload({ kind: "cart", cart: payload.cart });
           setActiveLayer("cart");
           setPanelLayer(null);
-          setCartIndicator({
-            count: parsed.cart.items?.length ?? 0,
-            total: parsed.cart.totalAED ?? 0,
-          });
+          const count = payload.cart.items?.length ?? 0;
+          const total = payload.cart.totalAED ?? 0;
+          setCartIndicator({ count, total });
         }
         return "ok";
-      } catch {
+      } catch (error) {
+        console.error("Error handling cartUpdated RPC", error);
         return "error";
       }
     };
 
-    // client.directions — agent sends { action: "show"|"clear", locations: [...] }
-    const handleDirectionsRpc = async (data: RpcInvocationData): Promise<string> => {
-      try {
-        const parsed = JSON.parse(data.payload ?? "{}") as {
-          action?: string;
-          locations?: DirectionLocation[];
-        };
-        if (parsed.action === "clear") {
-          setDirectionsPayload(null);
-          setActiveLayer("products");
-          setPanelLayer(null);
-        } else {
-          setDirectionsPayload({
-            kind: "directions",
-            locations: parsed.locations ?? [],
-          });
-          setActiveLayer("directions");
-          setPanelLayer(null);
-        }
-        return "ok";
-      } catch {
-        return "error";
-      }
-    };
-
-    room.registerRpcMethod("client.menuLoaded", ackOk);
-    room.registerRpcMethod("client.flavorsLoaded", ackOk);
-    room.registerRpcMethod("client.toppingsLoaded", ackOk);
+    room.registerRpcMethod("client.menuLoaded", handleMenuLoaded);
+    room.registerRpcMethod("client.flavorsLoaded", handleFlavorsLoaded);
+    room.registerRpcMethod("client.toppingsLoaded", handleToppingsLoaded);
     room.registerRpcMethod("client.cartUpdated", handleCartUpdated);
-    room.registerRpcMethod("client.directions", handleDirectionsRpc);
-
     return () => {
       room.unregisterRpcMethod("client.menuLoaded");
       room.unregisterRpcMethod("client.flavorsLoaded");
       room.unregisterRpcMethod("client.toppingsLoaded");
       room.unregisterRpcMethod("client.cartUpdated");
-      room.unregisterRpcMethod("client.directions");
     };
   }, [room]);
 
-  // ── Layout logic ─────────────────────────────────────────────────────────
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!rpcDirections) {
+      return;
+    }
+    if (rpcDirections.action === "clear") {
+      setDirectionsPayload(null);
+      setActiveLayer("products");
+      setPanelLayer(null);
+      return;
+    }
+    const locations = rpcDirectionsToLocations(rpcDirections);
+    setDirectionsPayload({ kind: "directions", locations });
+    setActiveLayer("directions");
+    setPanelLayer(null);
+  }, [rpcDirections]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   const panelContent = useMemo(() => {
-    if (panelLayer === "flavors" && flavorPayload)
+    if (panelLayer === "flavors" && flavorPayload) {
       return <FlavorsOverlay payload={flavorPayload} />;
-    if (panelLayer === "toppings" && toppingPayload)
+    }
+    if (panelLayer === "toppings" && toppingPayload) {
       return <ToppingsOverlay payload={toppingPayload} />;
+    }
     return null;
   }, [flavorPayload, panelLayer, toppingPayload]);
 
@@ -441,41 +559,38 @@ export function OverlayLayer() {
 
   const gridElement =
     productPayload?.view === "grid" ? (
-      <ProductGridOverlay
-        payload={productPayload as ProductGridPayload}
-        cartIndicator={cartIndicator}
-      />
+      <ProductGridOverlay payload={productPayload as ProductGridPayload} cartIndicator={cartIndicator} />
     ) : null;
 
   const showMenuColumn = Boolean(detailElement && menuCache && !panelLayer);
 
-  const renderCard = useCallback(
-    (content: ReactNode, widthClass: string, heightClass = "max-h-[calc(100vh-5rem)]") => {
-      if (!content) return null;
-      return (
-        <div
-          className={clsx(
-            "w-full shrink-0 overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl flex flex-col",
-            heightClass,
-            widthClass
-          )}
-        >
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-[color:var(--icecream-primary)]/20 scrollbar-track-transparent">
-            {content}
-          </div>
+  const renderCard = useCallback((content: ReactNode, widthClass: string, heightClass = "max-h-[calc(100vh-5rem)]") => {
+    if (!content) {
+      return null;
+    }
+    return (
+      <div
+        className={clsx(
+          "w-full shrink-0 overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl flex flex-col",
+          heightClass,
+          widthClass
+        )}
+      >
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-[color:var(--icecream-primary)]/20 scrollbar-track-transparent">
+          {content}
         </div>
-      );
-    },
-    []
-  );
+      </div>
+    );
+  }, []);
 
   let overlayBody: ReactNode = null;
   const containerClass = "w-full h-full px-1 sm:px-2 lg:px-6";
+  const cartContent = cartPayload?.cart;
 
-  if (activeLayer === "cart" && cartPayload) {
+  if (activeLayer === "cart" && cartContent) {
     overlayBody = (
       <div className={clsx(containerClass, "flex justify-start")}>
-        {renderCard(<CartOverlay payload={cartPayload} />, "max-w-[420px]")}
+        {renderCard(<CartOverlay payload={cartContent} />, "max-w-[420px]")}
       </div>
     );
   } else if (activeLayer === "directions" && directionsPayload) {
@@ -495,10 +610,7 @@ export function OverlayLayer() {
     overlayBody = (
       <div className={clsx(containerClass, "flex items-start justify-between gap-6")}>
         {renderCard(detailElement, "max-w-[520px]", "max-h-[calc(100vh-6rem)]")}
-        {renderCard(
-          <ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />,
-          "max-w-[520px]"
-        )}
+        {renderCard(<ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />, "max-w-[520px]")}
       </div>
     );
   } else if (detailElement) {
@@ -521,7 +633,9 @@ export function OverlayLayer() {
     );
   }
 
-  if (!overlayBody) return null;
+  if (!overlayBody) {
+    return null;
+  }
 
   return (
     <div className="pointer-events-none absolute inset-0 px-1 py-6 sm:px-2 lg:px-6">
@@ -529,11 +643,6 @@ export function OverlayLayer() {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
 function ProductGridOverlay({
   payload,
   cartIndicator,
@@ -548,9 +657,7 @@ function ProductGridOverlay({
     <div className={clsx("space-y-4", compact && "max-h-[70vh] overflow-hidden")}>
       {compact ? (
         <div className="flex items-center justify-between">
-          <p className="text-sm font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-            Menu
-          </p>
+          <p className="text-sm font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">Menu</p>
           {cartIndicator ? (
             <span className="text-xs font-semibold text-[color:var(--icecream-primary)]">
               Cart ({cartIndicator.count}) | {formatDirham(cartIndicator.total)}
@@ -567,14 +674,17 @@ function ProductGridOverlay({
             key={category}
             className={clsx(
               "cursor-default rounded-full px-3 py-1",
-              (payload.category ?? "All") === category
-                ? "bg-[color:var(--icecream-primary)] text-black"
-                : "bg-black/5 text-black/60"
+              (payload.category ?? "All") === category ? "bg-[color:var(--icecream-primary)] text-black" : "bg-black/5 text-black/60"
             )}
           >
             {category}
           </span>
         ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wide text-black/60">
+        <FilterBadge label="Size" />
+        <FilterBadge label="Price" />
+        <FilterBadge label="Type" />
       </div>
       <div className={clsx("overflow-y-auto pr-2", compact ? "max-h-[55vh]" : "max-h-[60vh]")}>
         {products.length === 0 ? (
@@ -584,30 +694,26 @@ function ProductGridOverlay({
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {products.map((product) => (
-              <article
-                key={product.id ?? product.name}
-                className="flex flex-col rounded-3xl border border-black/5 bg-white/95 p-3 shadow-sm"
-              >
+              <article key={product.id ?? product.name} className="flex flex-col rounded-3xl border border-black/5 bg-white/95 p-3 shadow-sm">
                 <CardImage src={product.imageUrl} alt={product.name} className="h-36" />
                 <div className="mt-3 space-y-1">
-                  <p className="text-base font-semibold text-[color:var(--icecream-dark)]">
-                    {product.name ?? "Treat"}
-                  </p>
-                  <p className="text-xs uppercase tracking-wide text-black/45">
-                    {product.category ?? "Menu"}
-                  </p>
-                  <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">
-                    {formatDirham(product.priceAED)}
-                  </p>
+                  <p className="text-base font-semibold text-[color:var(--icecream-dark)]">{product.name ?? "Treat"}</p>
+                  <p className="text-xs uppercase tracking-wide text-black/45">{product.category ?? "Menu"}</p>
+                  <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(product.priceAED)}</p>
                 </div>
               </article>
             ))}
           </div>
         )}
       </div>
+      <div className="flex items-center justify-between text-xs text-black/60">
+        <span>Home</span>
+        <span>Need Help?</span>
+      </div>
     </div>
   );
 }
+
 
 function ProductDetailOverlay({
   payload,
@@ -631,76 +737,94 @@ function ProductDetailOverlay({
   }
   return (
     <div className="space-y-4">
-      <HeaderBar
-        cartIndicator={cartIndicator}
-        subtitle={product.category ?? "Treat detail"}
-        showBack
-      />
+      <HeaderBar cartIndicator={cartIndicator} subtitle={product.category ?? "Treat detail"} showBack />
       <div className="rounded-[28px] border border-black/5 bg-white/95 p-4 shadow-inner">
         <div className="flex flex-col gap-4 lg:flex-row">
           <div className="w-full lg:w-1/3">
-            <CardImage src={product.imageUrl} alt={product.name} className="h-48" />
+            <CardImage src={product?.imageUrl} alt={product?.name} className="h-48" />
           </div>
           <div className="flex-1 space-y-2">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-                {product.category}
-              </p>
-              <h2 className="text-xl font-semibold text-black">{product.name ?? "Treat"}</h2>
-              {product.category === "Cakes" ? (
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{product?.category}</p>
+              <h2 className="text-xl font-semibold text-black">{product?.name ?? "Treat"}</h2>
+              {product?.category === "Cakes" ? (
                 <>
-                  <p className="text-xs text-black/60">Serves: {product.serves ?? "-"}</p>
-                  {product.cakeBaseFlavor ? (
-                    <p className="text-xs text-black/60">Base: {product.cakeBaseFlavor} cake</p>
-                  ) : null}
+                  <p className="text-xs text-black/60">Serves: {product?.serves ?? "-"}</p>
+                  {product?.cakeBaseFlavor ? <p className="text-xs text-black/60">Base: {product.cakeBaseFlavor} cake</p> : null}
                 </>
               ) : (
                 <p className="text-xs text-black/60">
-                  Size: {product.size ?? "-"}
-                  {typeof product.scoops === "number"
-                    ? ` · ${product.scoops} scoop${product.scoops === 1 ? "" : "s"}`
-                    : null}
+                  Size: {product?.size ?? "-"}
+                  {typeof product?.scoops === "number" ? ` · ${product?.scoops} scoop${product?.scoops === 1 ? "" : "s"}` : null}
                 </p>
               )}
-              {product.display ? (
-                <p className="text-[10px] text-black/60">Pickup: {product.display}</p>
-              ) : null}
+              {product.display ? <p className="text-[10px] text-black/60">Pickup: {product.display}</p> : null}
             </div>
             <div className="flex items-baseline gap-2">
-              <span className="text-lg font-bold text-[color:var(--icecream-primary)]">
-                {formatDirham(product.priceAED)}
-              </span>
+              <span className="text-lg font-bold text-[color:var(--icecream-primary)]">{formatDirham(product?.priceAED)}</span>
               <span className="text-xs text-black/40">base price</span>
             </div>
-            {product.category !== "Cakes" ? (
+
+            {/* Flavors / Toppings info row — hidden for cakes that have neither */}
+            {product?.category !== "Cakes" ? (
               <div className="rounded-xl bg-black/5 px-3 py-2 text-xs text-black/70">
                 <div className="flex justify-between">
                   <span>Included Flavors</span>
-                  <span className="font-medium">{product.scoops ?? 0}</span>
+                  <span className="font-medium">{product?.scoops ?? 0}</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Included Toppings</span>
-                  <span className="font-medium">{product.includedToppings ?? 0}</span>
+                  <span className="font-medium">{product?.includedToppings ?? 0}</span>
                 </div>
               </div>
+            ) : product?.allowsFlavorSelection ? (
+              /* Incredible Garden: show the 1-free-flavor badge */
+              <div className="rounded-xl bg-[color:var(--icecream-primary)]/8 border border-[color:var(--icecream-primary)]/20 px-3 py-2 text-xs text-[color:var(--icecream-primary)] font-medium">
+                1 free flavor included — choose any flavor you like
+              </div>
             ) : null}
+
+            {/* Action pills */}
+            <div className="flex flex-wrap gap-2 text-[10px]">
+              {product?.allowsFlavorSelection ? <ActionPill label={product?.category === "Cakes" ? "Choose Flavor" : "Choose Flavors"} /> : null}
+              {product?.category !== "Cakes" ? <ActionPill label="Add Toppings" /> : null}
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <div className="flex items-center gap-2 rounded-full border border-black/10 bg-white px-3 py-1 shadow-sm">
+                <span className="text-[10px] font-bold uppercase text-black">Qty</span>
+                <QuantityBadge />
+              </div>
+              <button type="button" className="flex-1 rounded-full bg-[color:var(--icecream-primary)] px-4 py-2 text-sm font-bold text-white shadow-md transition-transform active:scale-95 hover:scale-105">
+                Add to Cart
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* Integrated Summaries — only shown when the product actually uses them */}
         <div className="mt-4 space-y-2 border-t border-black/5 pt-2">
-          <SelectionSummary
-            title="Selected Flavors"
-            summary={payload.flavorSummary}
-            items={payload.selectedFlavors}
-            emptyLabel="No flavors selected."
-          />
-          <SelectionSummary
-            title="Selected Toppings"
-            summary={payload.toppingSummary}
-            items={payload.selectedToppings}
-            emptyLabel="No toppings selected."
-          />
+          {product?.allowsFlavorSelection ? (
+            <SelectionSummary
+              title={product?.category === "Cakes" ? "Selected Flavor" : "Selected Flavors"}
+              summary={payload.flavorSummary}
+              items={payload.selectedFlavors}
+              emptyLabel={product?.category === "Cakes" ? "No flavor selected yet." : "No flavors selected."}
+              actionLabel="Change"
+            />
+          ) : null}
+          {product?.category !== "Cakes" ? (
+            <SelectionSummary
+              title="Selected Toppings"
+              summary={payload.toppingSummary}
+              items={payload.selectedToppings}
+              emptyLabel="No toppings selected."
+              actionLabel="Change"
+            />
+          ) : null}
         </div>
       </div>
+
       {upgrade?.show ? <UpgradeBanner payload={upgrade} /> : null}
       <SizeOptions sizeOptions={payload.sizeOptions} />
     </div>
@@ -719,9 +843,7 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
       <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-black/70">
         <span>Scoops available:</span>
         <div className="flex items-center gap-1">{dots}</div>
-        <span className="text-xs font-medium text-black/50">
-          ({usedScoops} of {totalSlots} used)
-        </span>
+        <span className="text-xs font-medium text-black/50">({usedScoops} of {totalSlots} used)</span>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wide text-black/60">
         {FLAVOR_TABS.map((tab) => (
@@ -729,9 +851,7 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
             key={tab}
             className={clsx(
               "rounded-full px-3 py-1",
-              tab === "All"
-                ? "bg-[color:var(--icecream-primary)] text-black"
-                : "bg-black/5 text-black/50"
+              tab === "All" ? "bg-[color:var(--icecream-primary)] text-black" : "bg-black/5 text-black/50"
             )}
           >
             {tab}
@@ -747,20 +867,24 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
                 key={flavor.id ?? flavor.name}
                 className={clsx(
                   "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all cursor-pointer hover:shadow-md",
-                  selected &&
-                  "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
+                  selected && "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
                 )}
               >
                 <CardImage src={flavor.imageUrl} alt={flavor.name} className="h-32 bg-white" contain />
                 <div className="mt-3 space-y-1">
-                  <p className="text-base font-semibold text-[color:var(--icecream-dark)]">
-                    {flavor.name}
-                  </p>
-                  <p className="text-[11px] uppercase tracking-wide text-black/50">
-                    {flavor.classification ?? ""}
-                  </p>
+                  <p className="text-base font-semibold text-[color:var(--icecream-dark)]">{flavor.name}</p>
+                  <p className="text-[11px] uppercase tracking-wide text-black/50">{flavor.classification ?? ""}</p>
                 </div>
-                {selected ? <CheckBadge /> : null}
+                {selected && (
+                  <div className="mt-3 flex items-center justify-center">
+                    <span className="inline-flex items-center gap-1 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                      <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                      Selected
+                    </span>
+                  </div>
+                )}
               </article>
             );
           })}
@@ -768,9 +892,12 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
       </div>
       <div className="flex items-center justify-between rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
         <span>
-          Selected:{" "}
-          {payload.selectedFlavors?.map((f) => f.name).filter(Boolean).join(", ") || "None"}
+          Selected: {payload.selectedFlavors?.map((flavor) => flavor.name).filter(Boolean).join(", ") || "None"}
         </span>
+        <div className="flex items-center gap-2">
+          <ActionPill label="Clear" minimal />
+          <ActionPill label="Confirm" />
+        </div>
       </div>
     </div>
   );
@@ -779,20 +906,15 @@ function FlavorsOverlay({ payload }: { payload: FlavorOverlayPayload }) {
 function ToppingsOverlay({ payload }: { payload: ToppingOverlayPayload }) {
   const toppings = payload.toppings ?? [];
   const selectedIds = new Set(payload.selectedToppingIds ?? []);
-  const groupFive = toppings.filter((t) => !t.priceAED || t.priceAED <= 5.01);
-  const groupSix = toppings.filter((t) => t.priceAED != null && t.priceAED > 5.01);
+  const liquidToppings = toppings.filter((t) => t.type === "liquid");
+  const dryToppings = toppings.filter((t) => t.type !== "liquid");
   const selectedToppings = payload.selectedToppings ?? [];
   const freeSelected = selectedToppings.filter((t) => t.isFree).length;
   const extraSelected = Math.max(selectedToppings.length - freeSelected, 0);
-  const extraCost = selectedToppings
-    .filter((t) => !t.isFree)
-    .reduce((sum, t) => sum + (t.priceAED ?? 0), 0);
+  const extraCost = selectedToppings.filter((t) => !t.isFree).reduce((sum, t) => sum + (t.priceAED ?? 0), 0);
   return (
     <div className="space-y-3">
-      <OverlaySectionHeader
-        title="Add Toppings"
-        subtitle={payload.note ?? payload.productName}
-      />
+      <OverlaySectionHeader title="Add Toppings" subtitle={payload.note ?? payload.productName} />
       <div className="rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
         <p>
           Free toppings remaining: {payload.freeToppingsRemaining ?? 0}
@@ -801,48 +923,50 @@ function ToppingsOverlay({ payload }: { payload: ToppingOverlayPayload }) {
         <p className="text-[11px] text-black/50">Extra toppings cost 5 or 6 dirham each.</p>
       </div>
       <div className="max-h-[50vh] space-y-4 overflow-y-auto pr-3">
-        <ToppingPriceGroup title="Toppings — 5 dirham" items={groupFive} selectedIds={selectedIds} />
-        <ToppingPriceGroup title="Toppings — 6 dirham" items={groupSix} selectedIds={selectedIds} />
+        {liquidToppings.length > 0 && (
+          <ToppingPriceGroup title="🍫 Liquid Toppings" items={liquidToppings} selectedIds={selectedIds} />
+        )}
+        {dryToppings.length > 0 && (
+          <ToppingPriceGroup title="🍬 Dry Toppings" items={dryToppings} selectedIds={selectedIds} />
+        )}
       </div>
       <div className="space-y-2 rounded-2xl bg-black/5 px-4 py-3 text-xs text-black/70">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span>
-            Selected:{" "}
-            {payload.selectedToppings?.map((t) => t.name).filter(Boolean).join(", ") || "None"}
+            Selected: {selectedToppings.map((t) => t.name).filter(Boolean).join(", ") || "None"}
           </span>
           <span>
             Free: {freeSelected} · Extra: {extraSelected}
             {extraSelected > 0 ? ` (+${formatDirham(extraCost)})` : ""}
           </span>
         </div>
+        <div className="flex items-center justify-end gap-2">
+          <ActionPill label="Clear" minimal />
+          <ActionPill label="Confirm" />
+        </div>
       </div>
     </div>
   );
 }
 
-function CartOverlay({ payload }: { payload: CartPayload }) {
+function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["cart"]> }) {
   const items = payload.items ?? [];
   return (
     <div className="space-y-4 text-[color:var(--icecream-dark)]">
       <OverlaySectionHeader title="Your Cart" subtitle="Everything ready for pickup" showBack />
       {items.length === 0 ? (
-        <div className="rounded-3xl bg-white/90 p-6 text-center text-sm text-black/60">
-          Cart is empty for now.
-        </div>
+        <div className="rounded-3xl bg-white/90 p-6 text-center text-sm text-black/60">Cart is empty for now.</div>
       ) : (
         <div className="space-y-3">
           {items.map((item) => {
             const qty = item.qty ?? 1;
-            const unitTotal = qty ? (item.lineTotalAED ?? 0) / qty : (item.lineTotalAED ?? 0);
+            const unitTotal = qty ? (item.lineTotalAED ?? 0) / qty : item.lineTotalAED ?? 0;
             const productName = item.name ?? "";
             const sizeLabel = item.size ?? "";
             const showSize =
               sizeLabel && !productName.toLowerCase().includes(sizeLabel.toLowerCase());
             return (
-              <article
-                key={item.lineId ?? item.product_id ?? item.name}
-                className="space-y-3 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm"
-              >
+              <article key={item.lineId ?? item.product_id ?? item.name} className="space-y-3 rounded-3xl border border-black/5 bg-white/95 p-4 shadow-sm">
                 <div className="flex gap-3">
                   <div className="h-20 w-20 shrink-0">
                     <CardImage src={item.imageUrl} alt={item.name} className="h-20 w-20" contain />
@@ -853,14 +977,11 @@ function CartOverlay({ payload }: { payload: CartPayload }) {
                       {showSize ? ` - ${sizeLabel}` : ""}
                       {item.category ? ` (${item.category})` : ""}
                     </p>
+                    {item.display ? <p className="text-xs text-black/50">Pickup: {item.display}</p> : null}
                     <div className="flex flex-wrap gap-3 text-[11px] text-black/70">
                       <span>Base {formatDirham(item.basePriceAED)}</span>
-                      {item.flavorExtrasAED ? (
-                        <span>Flavor add-ons +{formatDirham(item.flavorExtrasAED)}</span>
-                      ) : null}
-                      {item.toppingExtrasAED ? (
-                        <span>Topping add-ons +{formatDirham(item.toppingExtrasAED)}</span>
-                      ) : null}
+                      {item.flavorExtrasAED ? <span>Flavor add-ons +{formatDirham(item.flavorExtrasAED)}</span> : null}
+                      {item.toppingExtrasAED ? <span>Topping add-ons +{formatDirham(item.toppingExtrasAED)}</span> : null}
                     </div>
                   </div>
                 </div>
@@ -868,18 +989,16 @@ function CartOverlay({ payload }: { payload: CartPayload }) {
                 <CartToppingList toppings={item.toppings} />
                 <div className="flex items-center justify-between">
                   <div className="space-y-1 text-xs text-black/60">
-                    <p>Qty: {qty}</p>
+                    <div className="flex items-center gap-2">
+                      Qty:
+                      <QuantityBadge value={qty} />
+                    </div>
                     <p>
-                      Per treat:{" "}
-                      <span className="font-semibold text-black/80">
-                        {formatDirham(unitTotal)}
-                      </span>
+                      Per treat: <span className="font-semibold text-black/80">{formatDirham(unitTotal)}</span>
                     </p>
                   </div>
                   <div className="text-right">
-                    <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">
-                      {formatDirham(item.lineTotalAED)}
-                    </p>
+                    <p className="text-sm font-semibold text-[color:var(--icecream-primary)]">{formatDirham(item.lineTotalAED)}</p>
                     <p className="text-[11px] text-black/50">Line total</p>
                   </div>
                 </div>
@@ -891,17 +1010,20 @@ function CartOverlay({ payload }: { payload: CartPayload }) {
       <div className="space-y-1 rounded-3xl bg-black/5 px-4 py-3 text-sm text-black/70">
         <div className="flex justify-between">
           <span>Subtotal</span>
-          {/* Agent field is subTotalAED (capital T) */}
-          <span>{formatDirham(payload.subTotalAED)}</span>
+          <span>{formatDirham(payload.subtotalAED)}</span>
         </div>
         <div className="flex justify-between">
-          <span>Tax (5%)</span>
+          <span>Tax / Fees</span>
           <span>{formatDirham(payload.taxAED)}</span>
         </div>
         <div className="flex justify-between text-base font-semibold text-[color:var(--icecream-dark)]">
           <span>Total</span>
           <span>{formatDirham(payload.totalAED)}</span>
         </div>
+      </div>
+      <div className="flex items-center justify-between text-xs text-black/60">
+        <ActionPill label="Add More Items" minimal />
+        <ActionPill label="Go to Pickup Instructions" />
       </div>
     </div>
   );
@@ -918,24 +1040,23 @@ function DirectionsOverlay({ payload }: { payload: DirectionsOverlayPayload }) {
     );
   }
   if (locations.length === 1) {
-    const loc = locations[0];
+    const location = locations[0];
     return (
       <div className="space-y-4">
-        <OverlaySectionHeader
-          title="Pickup Instructions"
-          subtitle={`Location: ${loc.displayName ?? "-"}`}
-          showBack
-        />
+        <OverlaySectionHeader title="Pickup Instructions" subtitle={`Location: ${location.displayName ?? "-"}`} showBack />
         <div className="rounded-3xl border border-black/5 bg-white/95 p-4 text-sm text-black/70">
-          <p>Location: {loc.displayName ?? "-"}</p>
+          <p>Pickup For: Your Order</p>
+          <p>Location: {location.displayName ?? "-"}</p>
         </div>
-        <CardImage src={loc.mapImage} alt={loc.displayName} className="h-64" />
-        <p className="text-sm text-black/70">
-          Hint: {loc.hint ?? "Check the signage by the counter."}
-        </p>
-        {loc.products?.length ? (
-          <p className="text-xs text-black/60">Collect: {loc.products.join(", ")}</p>
+        <CardImage src={location.mapImage} alt={location.displayName} className="h-64" />
+        <p className="text-sm text-black/70">Hint: {location.hint ?? "Check the signage by the counter."}</p>
+        {location.products?.length ? (
+          <p className="text-xs text-black/60">Collect: {location.products.join(", ")}</p>
         ) : null}
+        <div className="flex items-center justify-between text-xs text-black/60">
+          <ActionPill label="Done" />
+          <ActionPill label="New Order" minimal />
+        </div>
       </div>
     );
   }
@@ -943,20 +1064,15 @@ function DirectionsOverlay({ payload }: { payload: DirectionsOverlayPayload }) {
     <div className="space-y-4">
       <OverlaySectionHeader title="Pickup Instructions" showBack />
       <div className="space-y-3">
-        {locations.map((loc, i) => (
-          <article
-            key={loc.displayName ?? i}
-            className="space-y-2 rounded-2xl border border-black/5 bg-white/95 p-4 shadow-sm"
-          >
-            <p className="text-sm font-semibold">
-              Step {i + 1} – {loc.displayName ?? `Station ${i + 1}`}
-            </p>
+        {locations.map((location, index) => (
+          <article key={location.displayName ?? index} className="space-y-2 rounded-2xl border border-black/5 bg-white/95 p-4 shadow-sm">
+            <p className="text-sm font-semibold">Step {index + 1} – {location.displayName ?? `Station ${index + 1}`}</p>
             <div className="space-y-1 text-xs text-black/60">
-              {loc.products?.length ? <p>• Collect: {loc.products.join(", ")}</p> : null}
-              <p>• Hint: {loc.hint ?? "Look for Scoop signage."}</p>
-              {loc.mapImage ? (
+              {location.products?.length ? <p>• Collect: {location.products.join(", ")}</p> : null}
+              <p>• Hint: {location.hint ?? "Look for Scoop signage."}</p>
+              {location.mapImage ? (
                 <a
-                  href={loc.mapImage}
+                  href={location.mapImage}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center font-semibold text-[color:var(--icecream-primary)]"
@@ -968,14 +1084,19 @@ function DirectionsOverlay({ payload }: { payload: DirectionsOverlayPayload }) {
           </article>
         ))}
       </div>
+      <div className="flex items-center justify-between text-xs text-black/60">
+        <ActionPill label="Done" />
+        <ActionPill label="New Order" minimal />
+      </div>
     </div>
   );
 }
 
 function UpgradeBanner({ payload }: { payload: UpgradeOverlayPayload }) {
-  if (!payload.show || !payload.toProduct) return null;
-  const primaryLabel =
-    payload.uiCopy?.primaryCtaLabel ?? `Upgrade to ${payload.toProduct.name}`;
+  if (!payload.show || !payload.toProduct) {
+    return null;
+  }
+  const primaryLabel = payload.uiCopy?.primaryCtaLabel ?? `Upgrade to ${payload.toProduct.name}`;
   const secondaryLabel = payload.uiCopy?.secondaryCtaLabel ?? "Keep Current Choice";
   return (
     <div className="rounded-[28px] border border-dashed border-[color:var(--icecream-primary)] bg-[color:var(--icecream-primary)]/5 p-4">
@@ -984,17 +1105,12 @@ function UpgradeBanner({ payload }: { payload: UpgradeOverlayPayload }) {
         {payload.uiCopy?.bannerTitle ?? "Better Value Suggestion"}
       </p>
       <div className="mt-3 flex flex-col gap-4 sm:flex-row">
-        <CardImage
-          src={payload.toProduct.imageUrl}
-          alt={payload.toProduct.name}
-          className="h-32 sm:w-40"
-        />
+        <CardImage src={payload.toProduct.imageUrl} alt={payload.toProduct.name} className="h-32 sm:w-40" />
         <div className="flex-1 space-y-1 text-sm">
           <p className="text-base font-semibold">{payload.toProduct.headline}</p>
           <p className="text-black/70">{payload.toProduct.subline}</p>
           <p className="text-xs text-black/60">
-            Difference: {formatDirham(payload.priceDiffAED)} · Estimated savings:{" "}
-            {formatDirham(payload.savingsEstimateAED)}
+            Difference: {formatDirham(payload.priceDiffAED)} · Estimated savings: {formatDirham(payload.savingsEstimateAED)}
           </p>
         </div>
       </div>
@@ -1007,54 +1123,35 @@ function UpgradeBanner({ payload }: { payload: UpgradeOverlayPayload }) {
 }
 
 function SizeOptions({ sizeOptions }: { sizeOptions?: SizeOption[] }) {
-  if (!sizeOptions?.length) return null;
+  if (!sizeOptions?.length) {
+    return null;
+  }
   return (
     <div className="space-y-2 rounded-[28px] border border-black/5 bg-white/95 p-4">
       <p className="text-sm font-semibold">Size Options</p>
       <div className="flex flex-wrap items-center gap-3 text-sm font-semibold text-black/70">
-        {sizeOptions.map((opt, i) => (
-          <div key={opt.id ?? opt.size} className="flex items-center gap-2">
-            {i > 0 ? <span className="text-black/30">|</span> : null}
-            <span>{opt.size ?? "Size"}</span>
-            {typeof opt.priceAED === "number" ? (
-              <span className="text-xs text-black/50">{formatDirham(opt.priceAED)}</span>
-            ) : null}
+        {sizeOptions.map((option, index) => (
+          <div key={option.id ?? option.size} className="flex items-center gap-2">
+            {index > 0 ? <span className="text-black/30">|</span> : null}
+            <span>{option.size ?? "Size"}</span>
+            {typeof option.priceAED === "number" ? <span className="text-xs text-black/50">{formatDirham(option.priceAED)}</span> : null}
           </div>
         ))}
       </div>
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Shared UI primitives
-// ---------------------------------------------------------------------------
-
-function HeaderBar({
-  cartIndicator,
-  subtitle,
-  showBack,
-}: {
-  cartIndicator?: CartIndicator;
-  subtitle?: string;
-  showBack?: boolean;
-}) {
+function HeaderBar({ cartIndicator, subtitle, showBack }: { cartIndicator?: CartIndicator; subtitle?: string; showBack?: boolean }) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex items-center gap-3">
         {showBack ? (
-          <span className="inline-flex items-center rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black/60">
-            ← All Items
-          </span>
+          <span className="inline-flex items-center rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black/60">? All Items</span>
         ) : (
-          <div className="rounded-full bg-[color:var(--icecream-primary)]/15 px-3 py-1 text-sm font-semibold text-[color:var(--icecream-primary)]">
-            BR
-          </div>
+          <div className="rounded-full bg-[color:var(--icecream-primary)]/15 px-3 py-1 text-sm font-semibold text-[color:var(--icecream-primary)]">BR</div>
         )}
         <div>
-          <p className="text-base font-semibold text-[color:var(--icecream-dark)]">
-            Baskin Robbins Al Quoz
-          </p>
+          <p className="text-base font-semibold text-[color:var(--icecream-dark)]">Baskin Robbins Al Quoz</p>
           {subtitle ? <p className="text-xs text-black/60">{subtitle}</p> : null}
         </div>
       </div>
@@ -1066,31 +1163,19 @@ function HeaderBar({
     </div>
   );
 }
-
-function OverlaySectionHeader({
-  title,
-  subtitle,
-  showBack,
-}: {
-  title: string;
-  subtitle?: string | null;
-  showBack?: boolean;
-}) {
+function OverlaySectionHeader({ title, subtitle, showBack }: { title: string; subtitle?: string | null; showBack?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-          {subtitle ?? "On screen"}
-        </p>
+        <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{subtitle ?? "On screen"}</p>
         <h3 className="text-xl font-semibold text-[color:var(--icecream-dark)]">{title}</h3>
       </div>
-      {showBack ? (
-        <span className="inline-flex items-center rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black/60">
-          ← Back
-        </span>
-      ) : null}
+      {showBack ? <span className="inline-flex items-center rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black/60">? Back</span> : null}
     </div>
   );
+}
+function FilterBadge({ label }: { label: string }) {
+  return <span className="rounded-full bg-black/5 px-3 py-1 text-black/60">{label}</span>;
 }
 
 function ActionPill({ label, minimal }: { label: string; minimal?: boolean }) {
@@ -1099,13 +1184,18 @@ function ActionPill({ label, minimal }: { label: string; minimal?: boolean }) {
       type="button"
       className={clsx(
         "rounded-full px-3 py-1",
-        minimal
-          ? "border border-black/10 text-black/60"
-          : "bg-[color:var(--icecream-primary)] text-black"
+        minimal ? "border border-black/10 text-black/60" : "bg-[color:var(--icecream-primary)] text-black"
       )}
     >
       {label}
     </button>
+  );
+}
+function QuantityBadge({ value = 1 }: { value?: number }) {
+  return (
+    <span className="inline-flex items-center gap-2 rounded-full border border-black/10 px-3 py-1 text-xs font-semibold text-black">
+      – {value} +
+    </span>
   );
 }
 
@@ -1114,22 +1204,23 @@ function SelectionSummary({
   summary,
   items,
   emptyLabel,
+  actionLabel,
 }: {
   title: string;
   summary?: SummaryNote;
   items?: (FlavorSelection | ToppingSelection)[];
   emptyLabel: string;
+  actionLabel: string;
 }) {
   return (
     <div className="space-y-2 rounded-[28px] border border-black/5 bg-white/95 p-4">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-          {title}
-        </p>
-        <p className="text-sm text-black/70">{summary?.label ?? ""}</p>
-        {summary?.extraNote ? (
-          <p className="text-xs text-black/60">{summary.extraNote}</p>
-        ) : null}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{title}</p>
+          <p className="text-sm text-black/70">{summary?.label ?? ""}</p>
+          {summary?.extraNote ? <p className="text-xs text-black/60">{summary.extraNote}</p> : null}
+        </div>
+        <ActionPill label={actionLabel} minimal />
       </div>
       <div className="flex flex-wrap gap-2">
         {items?.length ? (
@@ -1149,19 +1240,15 @@ function SelectionSummary({
   );
 }
 
-function ToppingPriceGroup({
-  title,
-  items,
-  selectedIds,
-}: {
-  title: string;
-  items: ToppingCatalogCard[];
-  selectedIds: Set<string>;
-}) {
-  if (!items.length) return null;
+function ToppingPriceGroup({ title, items, selectedIds }: { title: string; items: ToppingCatalogCard[]; selectedIds: Set<string> }) {
+  if (!items.length) {
+    return null;
+  }
   return (
     <div className="space-y-2">
-      <p className="text-sm font-semibold text-[color:var(--icecream-dark)]">{title}</p>
+      <p className="text-sm font-semibold text-[color:var(--icecream-dark)] selection:bg-[color:var(--icecream-primary)]/20 selection:text-black">
+        {title}
+      </p>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-2">
         {items.map((item) => {
           const selected = selectedIds.has(item.id ?? "");
@@ -1170,18 +1257,24 @@ function ToppingPriceGroup({
               key={item.id ?? item.name}
               className={clsx(
                 "flex flex-col rounded-3xl border border-black/5 bg-white/95 p-4 text-center shadow-sm transition-all cursor-pointer hover:shadow-md",
-                selected &&
-                "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
+                selected && "border-[color:var(--icecream-primary)] shadow-[0_8px_20px_rgba(255,86,162,0.2)]"
               )}
             >
               <CardImage src={item.imageUrl} alt={item.name} className="h-32 bg-white" contain />
               <div className="mt-3 space-y-1">
-                <p className="text-base font-semibold text-[color:var(--icecream-dark)]">
-                  {item.name}
-                </p>
+                <p className="text-base font-semibold text-[color:var(--icecream-dark)]">{item.name}</p>
                 <p className="text-sm text-black/60">{formatDirham(item.priceAED)}</p>
               </div>
-              {selected ? <CheckBadge /> : null}
+              {selected && (
+                <div className="mt-3 flex items-center justify-center">
+                  <span className="inline-flex items-center gap-1 text-sm font-semibold text-[color:var(--icecream-primary)]">
+                    <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                    Selected
+                  </span>
+                </div>
+              )}
             </article>
           );
         })}
@@ -1193,19 +1286,17 @@ function ToppingPriceGroup({
 function CartFlavorList({ flavors }: { flavors?: CartFlavor[] }) {
   return (
     <div className="space-y-2">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-        Flavors
-      </p>
+      <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">Flavors</p>
       {flavors?.length ? (
         <div className="space-y-2">
-          {flavors.map((f) => (
+          {flavors.map((flavor) => (
             <CartSelectionRow
-              key={f.id ?? f.name}
-              image={f.imageUrl}
-              name={f.name}
-              descriptor={f.isExtra ? "Extra flavor" : "Included"}
-              qty={f.qty}
-              price={resolveLinePrice(f)}
+              key={flavor.id ?? flavor.name}
+              image={flavor.imageUrl}
+              name={flavor.name}
+              descriptor={flavor.isExtra ? "Extra flavor" : "Included"}
+              qty={flavor.qty}
+              price={resolveLinePrice(flavor)}
             />
           ))}
         </div>
@@ -1219,19 +1310,17 @@ function CartFlavorList({ flavors }: { flavors?: CartFlavor[] }) {
 function CartToppingList({ toppings }: { toppings?: CartTopping[] }) {
   return (
     <div className="space-y-2">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">
-        Toppings
-      </p>
+      <p className="text-xs font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">Toppings</p>
       {toppings?.length ? (
         <div className="space-y-2">
-          {toppings.map((t) => (
+          {toppings.map((topping) => (
             <CartSelectionRow
-              key={t.id ?? t.name}
-              image={t.imageUrl}
-              name={t.name}
-              descriptor={t.isFree ? "Included" : "Charged add-on"}
-              qty={t.qty}
-              price={t.isFree ? 0 : resolveLinePrice(t)}
+              key={topping.id ?? topping.name}
+              image={topping.imageUrl}
+              name={topping.name}
+              descriptor={topping.isFree ? "Included" : "Charged add-on"}
+              qty={topping.qty}
+              price={topping.isFree ? 0 : resolveLinePrice(topping)}
             />
           ))}
         </div>
@@ -1271,28 +1360,9 @@ function CartSelectionRow({
   );
 }
 
-function CardImage({
-  src,
-  alt,
-  className,
-  contain,
-}: {
-  src?: string | null;
-  alt?: string | null;
-  className?: string;
-  contain?: boolean;
-}) {
+function CardImage({ src, alt, className, contain }: { src?: string | null; alt?: string | null; className?: string; contain?: boolean }) {
   if (!src) {
-    return (
-      <div
-        className={clsx(
-          "flex items-center justify-center rounded-2xl bg-black/5 text-sm text-black/40",
-          className
-        )}
-      >
-        Image
-      </div>
-    );
+    return <div className={clsx("flex items-center justify-center rounded-2xl bg-black/5 text-sm text-black/40", className)}>Image</div>;
   }
   return (
     // eslint-disable-next-line @next/next/no-img-element
@@ -1308,42 +1378,23 @@ function CardImage({
   );
 }
 
-function CheckBadge() {
-  return (
-    <div className="mt-3 flex items-center justify-center">
-      <span className="inline-flex items-center gap-1 text-sm font-semibold text-[color:var(--icecream-primary)]">
-        <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-          <path
-            fillRule="evenodd"
-            d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-            clipRule="evenodd"
-          />
-        </svg>
-        Selected
-      </span>
-    </div>
-  );
-}
-
 function buildScoopsDots(free: number, selected: number) {
   const total = Math.max(free, selected, 1);
-  return Array.from({ length: total }).map((_, i) => (
-    <span
-      key={`scoop-${i}`}
-      className={clsx(
-        "inline-block h-3 w-3 rounded-full",
-        i < selected ? "bg-[color:var(--icecream-primary)]" : "bg-black/20"
-      )}
-    />
+  return Array.from({ length: total }).map((_, index) => (
+    <span key={`scoop-${index}`} className={clsx("inline-block h-3 w-3 rounded-full", index < selected ? "bg-[color:var(--icecream-primary)]" : "bg-black/20")}></span>
   ));
 }
 
-function resolveLinePrice(
-  entry?: { linePriceAED?: number | null; unitPriceAED?: number | null; qty?: number | null }
-) {
-  if (!entry) return 0;
-  if (typeof entry.linePriceAED === "number") return entry.linePriceAED;
-  return (entry.unitPriceAED ?? 0) * (entry.qty ?? 1);
+function resolveLinePrice(entry?: { linePriceAED?: number | null; unitPriceAED?: number | null; qty?: number | null }) {
+  if (!entry) {
+    return 0;
+  }
+  if (typeof entry.linePriceAED === "number") {
+    return entry.linePriceAED;
+  }
+  const qty = entry.qty ?? 1;
+  const unit = entry.unitPriceAED ?? 0;
+  return unit * qty;
 }
 
 function formatDirham(value?: number | null) {

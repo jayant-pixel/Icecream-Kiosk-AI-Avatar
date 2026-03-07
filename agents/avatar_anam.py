@@ -1,7 +1,8 @@
 ﻿"""
-Baskin Robbins Avatar Agent
----------------------------
-LiveKit Agents 1.3.x  |  Deepgram STT  |  OpenAI LLM  |  Cartesia TTS  |  Simli Avatar
+Baskin Robbins Avatar Agent — Hybrid
+------------------------------------
+Structure/Tools from Code 1 (Single Agent).
+Pipeline/RPCs from Code 2 (Deepgram/Google/Cartesia).
 """
 from __future__ import annotations
 
@@ -9,182 +10,297 @@ import asyncio
 import json
 import logging
 import os
-import re
 import secrets
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
-
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Literal,
+    Tuple,
+    cast,
+)
+import re
 from dotenv import load_dotenv
 
-# TOML: built-in on 3.11+, else tomli
+# TOML support (Python 3.11+ has tomllib built-in)
 if sys.version_info >= (3, 11):
     import tomllib
 else:
     try:
         import tomli as tomllib  # type: ignore[no-redef]
     except ImportError:
-        raise ImportError("Python < 3.11 requires 'tomli': pip install tomli")
-
-from livekit.agents import Agent, AgentSession, JobContext, JobRequest, WorkerOptions, WorkerType, cli
+        raise ImportError(
+            "Python < 3.11 requires the 'tomli' package. "
+            "Install it with: pip install tomli"
+        )
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    JobRequest,
+    RunContext,
+    WorkerOptions,
+    WorkerType,
+    cli,
+)
 from livekit.agents.llm import function_tool
 from livekit.agents.voice.room_io import RoomInputOptions
-from livekit.plugins import cartesia, deepgram, openai as lk_openai, silero, simli
+
+# --- CHANGED: New Plugin Imports ---
+from livekit.plugins import openai as lk_openai, deepgram, cartesia, silero, simli
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+# from livekit.plugins import google as lk_google  # COMMENTED OUT: Using OpenAI
+# from livekit.plugins.anam import avatar as anam_avatar  # COMMENTED OUT: Switched to Simli
 
-from kb import SCOOP_KB
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logger = logging.getLogger("baskin-avatar-agent")
 logger.setLevel(logging.INFO)
-
 load_dotenv(dotenv_path=Path(__file__).resolve().with_name(".env"))
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-OVERLAY_TOPIC = "ui.overlay"
-CATEGORY_FALLBACK = "Highlights"
-VAT_RATE = Decimal("0.05")
-
-# ---------------------------------------------------------------------------
-# Environment validation  (single, authoritative check)
-# ---------------------------------------------------------------------------
-_REQUIRED_ENV = [
-    "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
-    "OPENAI_API_KEY", "DEEPGRAM_API_KEY", "CARTESIA_API_KEY", "SIMLI_API_KEY",
+# =========================
+# Environment Validation
+# =========================
+REQUIRED_ENV_VARS = [
+    "LIVEKIT_URL",
+    "LIVEKIT_API_KEY", 
+    "LIVEKIT_API_SECRET",
+    "OPENAI_API_KEY",
+    "DEEPGRAM_API_KEY",
+    "CARTESIA_API_KEY",
+    "SIMLI_API_KEY",
 ]
 
-
-def _validate_env() -> None:
-    missing = [v for v in _REQUIRED_ENV if not os.getenv(v)]
+def validate_environment() -> None:
+    """Validate required environment variables at startup."""
+    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
     if missing:
-        raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(missing)}. "
+            f"Please check your .env file."
+        )
+
+# Validate on import
+validate_environment()
+
+OVERLAY_TOPIC = "ui.overlay"
+CATEGORY_FALLBACK = "Highlights"
+
+# Simple UAE VAT (5%) – applied on top of item + extras
+VAT_RATE = Decimal("0.05")
+
+# =========================
+# Global Helper Functions (From Code 1)
+# =========================
 
 
-_validate_env()
-
-# ---------------------------------------------------------------------------
-# Token helpers  (module-level, reused everywhere)
-# ---------------------------------------------------------------------------
-
-def _normalize(value: Optional[str]) -> str:
-    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+def _normalize_label(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
 def _tokenize(value: Optional[str]) -> set[str]:
     tokens: set[str] = set()
-    for raw in re.split(r"[^a-z0-9]+", (value or "").lower()):
-        t = raw.strip()
-        if t:
-            tokens.add(t)
-            if t.endswith("s") and len(t) > 1:
-                tokens.add(t[:-1])
+    if not value:
+        return tokens
+    for raw in re.split(r"[^a-z0-9]+", value.lower()):
+        token = raw.strip()
+        if not token:
+            continue
+        tokens.add(token)
+        if token.endswith("s") and len(token) > 1:
+            tokens.add(token[:-1])
     return tokens
 
 
-def _label_tokens(value: Optional[str]) -> set[str]:
+def _tokens_for_label(value: Optional[str]) -> set[str]:
     tokens = _tokenize(value)
-    n = _normalize(value)
-    if n:
-        tokens.add(n)
-        if n.endswith("s") and len(n) > 1:
-            tokens.add(n[:-1])
+    normalized = _normalize_label(value)
+    if normalized:
+        tokens.add(normalized)
+        if normalized.endswith("s") and len(normalized) > 1:
+            tokens.add(normalized[:-1])
     return tokens
 
-# ---------------------------------------------------------------------------
-# Serialisation helper  (converts Decimal → float recursively, once)
-# ---------------------------------------------------------------------------
 
-def _clean(data: Any) -> Any:
-    """Recursively convert Decimal to float so JSON serialisation is safe."""
+def build_name_index(entries: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+    index: Dict[str, List[str]] = {}
+    for entry_id, entry in entries.items():
+        normalized = _normalize_label(entry.get("name"))
+        if not normalized:
+            continue
+        index.setdefault(normalized, []).append(entry_id)
+        if normalized.endswith("s") and len(normalized) > 1:
+            index.setdefault(normalized[:-1], []).append(entry_id)
+    return index
+
+
+def _sanitize_output(data: Any) -> Any:
     if isinstance(data, Decimal):
         return float(data)
     if isinstance(data, dict):
-        return {k: _clean(v) for k, v in data.items()}
+        return {k: _sanitize_output(v) for k, v in data.items()}
     if isinstance(data, list):
-        return [_clean(v) for v in data]
+        return [_sanitize_output(v) for v in data]
     return data
 
-# ---------------------------------------------------------------------------
-# Time-of-day greeting helpers
-# ---------------------------------------------------------------------------
 
-def _greeting(arabic: bool = False) -> str:
-    h = datetime.now().hour
-    if arabic:
-        if 5 <= h < 12:
-            return "صباح الخير"
-        return "مساء الخير" if h < 17 else "مساء النور"
-    if 5 <= h < 12:
+def _time_of_day_greeting() -> str:
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
         return "Good morning"
-    return "Good afternoon" if h < 17 else "Good evening"
+    if 12 <= hour < 17:
+        return "Good afternoon"
+    return "Good evening"
 
-# ---------------------------------------------------------------------------
-# Prompt loader  (loads & caches personal.toml once)
-# ---------------------------------------------------------------------------
-_TOML_PATH = Path(__file__).resolve().with_name("personal.toml")
+
+def _time_of_day_greeting_arabic() -> str:
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "صباح الخير"
+    if 12 <= hour < 17:
+        return "مساء الخير"
+    return "مساء النور"
+
+
+# =========================
+# Dynamic Prompt Loader
+# =========================
+_PERSONAL_TOML_PATH = Path(__file__).resolve().with_name("personal.toml")
 _PROMPT_CACHE: Dict[str, Dict[str, str]] = {}
 
 
-def _load_prompt(language: str = "english") -> Tuple[str, str]:
+def load_prompt_config(language: str = "english") -> Tuple[str, str]:
+    """
+    Load prompt and voice_id from personal.toml for the given language.
+    Returns (prompt_text, voice_id).
+    Caches the TOML file after first read.
+    """
     global _PROMPT_CACHE
     if not _PROMPT_CACHE:
-        with open(_TOML_PATH, "rb") as fh:
-            _PROMPT_CACHE = tomllib.load(fh)
-        logger.info("[PROMPT] Loaded personal.toml: %s", list(_PROMPT_CACHE))
-    lang = language.lower().strip()
-    if lang not in _PROMPT_CACHE:
-        logger.warning("[PROMPT] Language '%s' not found, falling back to english", lang)
-        lang = "english"
-    s = _PROMPT_CACHE[lang]
-    return s["prompt"], s["voice_id"]
+        with open(_PERSONAL_TOML_PATH, "rb") as f:
+            _PROMPT_CACHE = tomllib.load(f)
+        logger.info("[PROMPT] Loaded personal.toml with languages: %s", list(_PROMPT_CACHE.keys()))
 
-# ---------------------------------------------------------------------------
-# Session state  (lightweight context carried across turns)
-# ---------------------------------------------------------------------------
+    lang_key = language.lower().strip()
+    if lang_key not in _PROMPT_CACHE:
+        logger.warning(
+            "[PROMPT] Language '%s' not found in personal.toml, falling back to 'english'",
+            lang_key,
+        )
+        lang_key = "english"
+
+    section = _PROMPT_CACHE[lang_key]
+    return section["prompt"], section["voice_id"]
+
 
 @dataclass
-class SessionState:
+class ScoopSessionState:
+    """Tracks contextual signals (From Code 1)."""
+
     guest_name: Optional[str] = None
     last_overlay_kind: Optional[str] = None
+    last_overlay_payload: Optional[Dict[str, Any]] = None
+    overlay_ack_id: Optional[str] = None
     overlay_history: List[str] = field(default_factory=list)
     current_product_id: Optional[str] = None
+    current_product_summary: Optional[str] = None
+
+    # NEW: last RPC context
+    last_rpc_method: Optional[str] = None
+    last_rpc_request: Optional[Dict[str, Any]] = None
+    last_rpc_response: Optional[Dict[str, Any]] = None
 
     def describe(self) -> str:
-        history = ", ".join(self.overlay_history[-4:]) or "none"
+        overlay_info = self.last_overlay_kind or "none"
+        history = ", ".join(self.overlay_history[-4:]) if self.overlay_history else "none"
+        guest = self.guest_name or "unknown"
+        active_product = self.current_product_id or "none"
+        product_summary = self.current_product_summary or "No active build in progress."
+
+        rpc_part = f"Last UI RPC: {self.last_rpc_method or 'none'}."
+
         return (
-            f"Guest: {self.guest_name or 'unknown'}. "
-            f"Last overlay: {self.last_overlay_kind or 'none'}. "
-            f"History: {history}. "
-            f"Active product: {self.current_product_id or 'none'}."
+            f"Guest name: {guest}. "
+            f"Last UI overlay shown: {overlay_info}. "
+            f"Active product focus: {active_product}. "
+            f"{product_summary} "
+            f"{rpc_part}"
         )
 
-# ---------------------------------------------------------------------------
-# Agent config  (single source of truth for all env vars)
-# ---------------------------------------------------------------------------
+
+# =========================
+# Prompt is loaded dynamically from personal.toml
+# See load_prompt_config() above
+# =========================
+
+from kb import SCOOP_KB
+
+
+# ==========================
+# Agent Configuration (Updated for Deepgram/Google/Cartesia)
+# ==========================
+
 
 class AgentConfig:
     def __init__(self) -> None:
-        self.livekit_url = os.environ["LIVEKIT_URL"]
-        self.livekit_api_key = os.environ["LIVEKIT_API_KEY"]
-        self.livekit_api_secret = os.environ["LIVEKIT_API_SECRET"]
+        self.livekit_url = os.getenv("LIVEKIT_URL", "")
+        self.livekit_api_key = os.getenv("LIVEKIT_API_KEY", "")
+        self.livekit_api_secret = os.getenv("LIVEKIT_API_SECRET", "")
         self.agent_name = os.getenv("LIVEKIT_AGENT_NAME", "baskin-avatar")
         self.agent_identity_prefix = (
             os.getenv("LIVEKIT_AGENT_IDENTITY_PREFIX", self.agent_name)
-            .strip().lower().replace(" ", "-")
+            .strip()
+            .lower()
+            .replace(" ", "-")
         )
-        self.openai_api_key = os.environ["OPENAI_API_KEY"]
+        # --- CHANGED: Keys for new pipeline ---
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
         self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini-2025-04-14")
-        self.deepgram_api_key = os.environ["DEEPGRAM_API_KEY"]
-        self.cartesia_api_key = os.environ["CARTESIA_API_KEY"]
-        self.simli_api_key = os.environ["SIMLI_API_KEY"]
+        
+        # COMMENTED OUT: Google Gemini configuration
+        # self.google_api_key = os.getenv("GOOGLE_API_KEY", "")
+        # self.google_model = os.getenv("GOOGLE_MODEL", "gemini-3-flash-preview")
+        
+        self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
+        self.cartesia_api_key = os.getenv("CARTESIA_API_KEY", "")
+        self.cartesia_voice_id = os.getenv(
+            "CARTESIA_VOICE_ID", "829ccd10-f8b3-43cd-b8a0-4aeaa81f3b30"
+        )
+
+        # COMMENTED OUT: Anam configuration (switched to Simli)
+        # self.anam_api_key = os.getenv("ANAM_API_KEY", "")
+        # self.anam_avatar_id = os.getenv("ANAM_AVATAR_ID", "")
+        
+        # Simli configuration
+        self.simli_api_key = os.getenv("SIMLI_API_KEY", "")
         self.simli_face_id = os.getenv("SIMLI_FACE_ID", "cace3ef7-a4c4-425d-a8cf-a5358eb0c427")
+        self._validate()
+
+    def _validate(self) -> None:
+        required = {
+            "LIVEKIT_API_KEY": self.livekit_api_key,
+            "LIVEKIT_API_SECRET": self.livekit_api_secret,
+            "OPENAI_API_KEY": self.openai_api_key,
+            # COMMENTED OUT: Google Gemini validation
+            # "GOOGLE_API_KEY": self.google_api_key,
+            "DEEPGRAM_API_KEY": self.deepgram_api_key,
+            "CARTESIA_API_KEY": self.cartesia_api_key,
+            # COMMENTED OUT: Anam validation (switched to Simli)
+            # "ANAM_API_KEY": self.anam_api_key,
+            # "ANAM_AVATAR_ID": self.anam_avatar_id,
+            "SIMLI_API_KEY": self.simli_api_key,
+        }
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            raise RuntimeError(
+                f"Missing required environment variables: {', '.join(missing)}"
+            )
 
     def agent_identity(self, job_id: Optional[str]) -> str:
         suffix = (job_id or secrets.token_hex(3))[-6:]
@@ -197,7 +313,7 @@ class AgentConfig:
         return {
             "role": "agent",
             "agentName": self.agent_name,
-            "avatarId": self.simli_face_id,
+            "avatarId": self.simli_face_id,  # Changed from anam_avatar_id to simli_face_id
             "agentType": "avatar",
             "agentIdentity": agent_identity,
         }
@@ -205,70 +321,143 @@ class AgentConfig:
 
 CONFIG = AgentConfig()
 
-# ---------------------------------------------------------------------------
-# UI communication helpers
-# ---------------------------------------------------------------------------
-
-async def _publish_overlay(room: Any, kind: str, data: Dict[str, Any]) -> None:
-    """Publish a UI overlay via LiveKit data packet."""
-    lp = getattr(room, "local_participant", None)
-    if not lp:
-        logger.warning("[OVERLAY] No local_participant, skipping kind=%s", kind)
-        return
-    msg = json.dumps({"type": "ui.overlay", "payload": {"kind": kind, **_clean(data)}}).encode()
-    try:
-        await lp.publish_data(msg, topic=OVERLAY_TOPIC)
-    except Exception:
-        logger.exception("[OVERLAY] publish failed kind=%s", kind)
+# =========================
+# UI Overlay / RPC Helpers
+# =========================
 
 
-async def _rpc(room: Any, method: str, payload: Dict[str, Any]) -> Optional[str]:
+async def _publish_overlay(
+    session: Optional[AgentSession],
+    kind: str,
+    data: Dict[str, Any],
+    room: Optional[Any] = None,
+) -> None:
     """
-    Send an RPC to the first guest participant in the room.
-    Returns the raw response string, or None on failure.
+    Publish overlay data to the UI via LiveKit data packets.
+    IMPORTANT: we now always rely on the explicit `room` argument,
+    not on `session.room`.
     """
-    lp = getattr(room, "local_participant", None)
-    if not lp:
-        logger.error("[RPC] No local_participant for method=%s", method)
-        return None
-
-    # Collect guest identities (exclude self)
-    local_id = getattr(lp, "identity", None)
-    destinations = [
-        identity
-        for p in room.remote_participants.values()
-        if (identity := getattr(p, "identity", None))
-        and identity != local_id
-        and (
-            identity.startswith("guest")
-            or (getattr(p, "attributes", {}) or {}).get("role") == "guest"
+    room_obj = room
+    if not room_obj:
+        logger.warning(
+            "[OVERLAY] No room attached, skipping overlay for kind=%s", kind
         )
-    ]
-    if not destinations:
-        logger.warning("[RPC] No guest found for method=%s", method)
+        return
+
+    local_participant = getattr(room_obj, "local_participant", None)
+    if not local_participant:
+        logger.warning(
+            "[OVERLAY] No local_participant on room, skipping overlay for kind=%s",
+            kind,
+        )
+        return
+
+    clean_data = _sanitize_output(data)
+    message = json.dumps(
+        {"type": "ui.overlay", "payload": {"kind": kind, **clean_data}}
+    ).encode("utf-8")
+
+    logger.info(
+        "[OVERLAY] Publishing overlay | kind=%s | keys=%s",
+        kind,
+        list(clean_data.keys()),
+    )
+    try:
+        await local_participant.publish_data(message, topic=OVERLAY_TOPIC)
+    except Exception as exc:
+        logger.exception("Failed to publish overlay '%s': %s", kind, exc)
+
+
+async def _emit_client_rpc(
+    ctx: Optional[RunContext],
+    method: str,
+    payload: Dict[str, Any],
+    session: Optional[AgentSession] = None,
+    room: Optional[Any] = None,
+) -> Optional[str]:
+    """
+    Emitting RPC to UI clients.
+
+    CRITICAL CHANGE:
+    - We no longer depend on `session.room`.
+    - We instead use explicit `room` (which is `ctx.room` / JobContext.room).
+    """
+    run_ctx = cast(Optional[RunContext], ctx) if ctx else None
+    session_obj = session  # kept for possible future use
+
+    room_obj = room
+    if not room_obj:
+        logger.error("[RPC] FAILED — No room available for method=%s", method)
         return None
 
-    dest = destinations[0]
+    local_participant = getattr(room_obj, "local_participant", None)
+    if not local_participant:
+        logger.error(
+            "[RPC] FAILED — Room has no local_participant for method=%s", method
+        )
+        return None
+
+    local_identity = getattr(local_participant, "identity", None)
+    destinations: List[str] = []
+    for participant in room_obj.remote_participants.values():
+        identity = getattr(participant, "identity", None)
+        if not identity or identity == local_identity:
+            continue
+        attrs = getattr(participant, "attributes", {}) or {}
+        is_guest = (
+            identity.startswith("guest-")
+            or identity.startswith("guest_")
+            or attrs.get("role") == "guest"
+        )
+        if is_guest and identity not in destinations:
+            destinations.append(identity)
+
+    if not destinations:
+        logger.warning(
+            "[RPC] No guest participants found for method=%s, skipping RPC", method
+        )
+        return None
+
+    clean_payload = _sanitize_output(payload)
+    payload_json = json.dumps(clean_payload)
+    dest_identity = destinations[0]
+
+    logger.info(
+        "[RPC] Attempting RPC → %s | destination=%s | payload=%s",
+        method,
+        dest_identity,
+        clean_payload,
+    )
     try:
-        resp = await lp.perform_rpc(
-            destination_identity=dest,
+        response = await local_participant.perform_rpc(
+            destination_identity=dest_identity,
             method=method,
-            payload=json.dumps(_clean(payload)),
+            payload=payload_json,
             response_timeout=2.0,
         )
-        logger.debug("[RPC] %s → %s ok", method, dest)
-        return resp
-    except Exception:
-        logger.error("[RPC] %s → %s failed", method, dest, exc_info=True)
+        logger.info(
+            "[RPC] SUCCESS ← %s | destination=%s | response=%s",
+            method,
+            dest_identity,
+            response,
+        )
+        return response
+    except Exception as exc:
+        logger.error(
+            "[RPC] FAILED — method=%s | destination=%s | error=%s",
+            method,
+            dest_identity,
+            exc,
+        )
         return None
 
-# ---------------------------------------------------------------------------
-# ScoopTools  (all agent function_tools)
-# ---------------------------------------------------------------------------
+
+# =================
+# Tools / Functions
+# =================
+
 
 class ScoopTools:
-    """Encapsulates all tools available to the avatar agent."""
-
     SIZE_ALIAS = {"small": "Kids", "value": "Value", "big": "Emlaaq", "large": "Emlaaq"}
 
     def __init__(
@@ -276,155 +465,223 @@ class ScoopTools:
         config: AgentConfig,
         session: AgentSession,
         room: Any,
-        session_state: SessionState,
+        controller_identity: Optional[str],
+        session_state: ScoopSessionState,
     ) -> None:
-        self._config = config
+        self.config = config
         self._session = session
-        self._room = room
-        self._state = session_state
-
-        # Knowledge base slices
+        self._room = room  # <=== IMPORTANT: store JobContext.room here
+        self._controller_identity = controller_identity
+        self._session_state = session_state
         self._kb = SCOOP_KB
-        self._products: Dict[str, Dict[str, Any]] = self._kb["products"]
         self._product_order: List[str] = [
-            pid for pid in self._kb.get("product_order", []) if pid in self._products
+            pid
+            for pid in self._kb.get("product_order", [])
+            if pid in self._kb["products"]
         ]
-        # Flavors/toppings keyed by id for O(1) lookup
-        self._flavors: Dict[str, Dict[str, Any]] = {f["id"]: f for f in self._kb.get("flavors", [])}
-        self._toppings: Dict[str, Dict[str, Any]] = {t["id"]: t for t in self._kb.get("toppings", [])}
-
-        # Per-session order state
+        self._products = self._kb["products"]
+        self._flavors = {f["id"]: f for f in self._kb.get("flavors", [])}
+        self._toppings = {t["id"]: t for t in self._kb.get("toppings", [])}
+        # line_state stores per-product selections (one active "build" per product ID per session)
         self._line_state: Dict[str, Dict[str, Any]] = {}
         self._cart_items: List[Dict[str, Any]] = []
         self._cart_summary: Dict[str, Any] = {}
         self._active_product_id: Optional[str] = None
+        self._product_tokens_cache: Dict[str, set[str]] = {}
+        self._flavor_tokens_cache: Dict[str, set[str]] = {}
+        self._topping_tokens_cache: Dict[str, set[str]] = {}
+        self._flavor_name_index = build_name_index(self._flavors)
+        self._topping_name_index = build_name_index(self._toppings)
+        self._pending_overlays: Dict[str, Dict[str, Any]] = {}
+        self._last_overlay_ack: Optional[Dict[str, Any]] = None
 
-        # Pre-computed token caches for fast fuzzy matching
-        self._product_tokens: Dict[str, set[str]] = {}
-        self._flavor_tokens: Dict[str, set[str]] = {}
-        self._topping_tokens: Dict[str, set[str]] = {}
-
-        # Extra flavor price (0 if policy disallows extras — kept for pricing integrity)
+        # Shared pricing configuration for flavors (used consistently in tools and cart)
         fp = self._kb.get("flavor_policy", {}).get("defaultFlavorPriceAED", 0.0)
-        self._extra_flavor_price = Decimal(str(fp))
+        self._extra_flavor_price: Decimal = Decimal(str(fp))
 
-    # ------------------------------------------------------------------
-    # Internal: token caches
-    # ------------------------------------------------------------------
-
-    def _product_token_set(self, pid: str) -> set[str]:
-        if pid not in self._product_tokens:
-            p = self._products[pid]
-            tokens = _label_tokens(p.get("name")) | _label_tokens(p.get("category")) | _label_tokens(p.get("size"))
-            cat = (p.get("category") or "").lower()
-            if "milk" in cat or "shake" in cat:
-                tokens.update({"shake", "milkshake", "milkshakes"})
-            if "sundae" in cat:
-                tokens.add("sundae")
-            if "cup" in cat:
-                tokens.add("cup")
-            self._product_tokens[pid] = tokens
-        return self._product_tokens[pid]
-
-    def _flavor_token_set(self, fid: str) -> set[str]:
-        if fid not in self._flavor_tokens:
-            self._flavor_tokens[fid] = _label_tokens(self._flavors[fid].get("name"))
-        return self._flavor_tokens[fid]
-
-    def _topping_token_set(self, tid: str) -> set[str]:
-        if tid not in self._topping_tokens:
-            self._topping_tokens[tid] = _label_tokens(self._toppings[tid].get("name"))
-        return self._topping_tokens[tid]
-
-    # ------------------------------------------------------------------
-    # Internal: resolvers
-    # ------------------------------------------------------------------
-
-    def _resolve_product(self, product_id: Optional[str], query: Optional[str]) -> Optional[Dict[str, Any]]:
-        if product_id:
-            return self._products.get(product_id)
-        if not query:
+    def _find_sundae_upgrade(self, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Find a Sundae Cup alternative with matching size/scoops for Cup upsell."""
+        if product.get("category") != "Cups":
             return None
-        q = query.lower()
-        # Fast substring match
+        size = product.get("size")
+        scoops = product.get("scoops")
         for p in self._products.values():
-            if q in (p.get("name") or "").lower():
+            if (
+                p.get("category") == "Sundae Cups"
+                and p.get("size") == size
+                and p.get("scoops") == scoops
+                and p.get("available", True)
+            ):
                 return p
-        # Token-based match
-        q_tokens = _label_tokens(query)
-        if not q_tokens:
-            return None
-        best_pid, best_score = None, 0
-        for pid in self._product_order:
-            score = len(self._product_token_set(pid) & q_tokens)
-            if score > best_score:
-                best_score, best_pid = score, pid
-        return self._products.get(best_pid) if best_pid and best_score > 0 else None
+        return None
 
-    def _resolve_flavor(self, ref: str) -> Optional[Dict[str, Any]]:
-        # Direct id / exact name
-        if ref in self._flavors:
-            return self._flavors[ref]
+    def _suggest_flavor(self, exclude_ids: set[str]) -> Optional[Dict[str, Any]]:
+        """Pick the first available flavor not already selected."""
         for f in self._flavors.values():
-            if f["name"].lower() == ref.lower():
-                return f
-        # Token match
-        ref_tokens = _label_tokens(ref)
-        if not ref_tokens:
-            return None
-        best_fid, best_score = None, 0
-        for fid in self._flavors:
-            score = len(self._flavor_token_set(fid) & ref_tokens)
-            if score > best_score:
-                best_score, best_fid = score, fid
-        return self._flavors.get(best_fid) if best_fid and best_score > 0 else None
+            fid = f.get("id")
+            if not fid or fid in exclude_ids:
+                continue
+            if not f.get("available", True):
+                continue
+            return f
+        return None
 
-    def _resolve_topping(self, ref: str) -> Optional[Dict[str, Any]]:
-        if ref in self._toppings:
-            return self._toppings[ref]
+    def _suggest_topping(self, exclude_ids: set[str]) -> Optional[Dict[str, Any]]:
+        """Pick the first available topping not already selected."""
         for t in self._toppings.values():
-            if t["name"].lower() == ref.lower():
-                return t
-        ref_tokens = _label_tokens(ref)
-        if not ref_tokens:
+            tid = t.get("id")
+            if not tid or tid in exclude_ids:
+                continue
+            if not t.get("available", True):
+                continue
+            return t
+        return None
+
+    def _suggest_premium_topping(
+        self, exclude_ids: set[str], current_flavors: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Pick a higher-priced topping that pairs with selected flavors."""
+        flavor_classes = {
+            f.get("classification") for f in current_flavors if f.get("classification")
+        }
+        flavor_names = " ".join(f.get("name", "") for f in current_flavors).lower()
+
+        def score(t: Dict[str, Any]) -> int:
+            name = (t.get("name") or "").lower()
+            s = 0
+            # price weight: prefer 6-dirham over 5
+            price = t.get("priceAED")
+            if isinstance(price, (int, float)) and price >= 6:
+                s += 3
+            # pairing weights
+            if "choco" in flavor_names or "choco" in flavor_classes:
+                if any(k in name for k in ["choco", "fudge", "nutella", "kitkat", "brownie"]):
+                    s += 3
+            if "berry" in flavor_names or "berry" in flavor_classes or "strawberry" in flavor_names:
+                if any(k in name for k in ["berry", "strawberry", "rasp"]):
+                    s += 3
+            if any(k in flavor_names for k in ["vanilla", "classic", "coffee"]):
+                if any(k in name for k in ["almond", "pistachio", "caramel", "sprinkle"]):
+                    s += 2
+            return s
+
+        candidates = []
+        for t in self._toppings.values():
+            tid = t.get("id")
+            if not tid or tid in exclude_ids:
+                continue
+            if not t.get("available", True):
+                continue
+            candidates.append((score(t), t))
+        if not candidates:
             return None
-        best_tid, best_score = None, 0
-        for tid in self._toppings:
-            score = len(self._topping_token_set(tid) & ref_tokens)
-            if score > best_score:
-                best_score, best_tid = score, tid
-        return self._toppings.get(best_tid) if best_tid and best_score > 0 else None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1] if candidates[0][0] > 0 else candidates[0][1]
 
-    # ------------------------------------------------------------------
-    # Internal: line state
-    # ------------------------------------------------------------------
+    async def _rpc_with_context(
+        self,
+        method: str,
+        payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Wrapper around _emit_client_rpc that:
+        - calls the UI
+        - parses the response (if any)
+        - stores it into ScoopSessionState
+        - returns parsed response so tools can include it in their JSON
 
-    def _line(self, product: Dict[str, Any]) -> Dict[str, Any]:
-        pid = product["id"]
-        if pid not in self._line_state:
-            free_flavors = int(product.get("scoops") or 0)
-            free_toppings = int(product.get("includedToppings") or 0)
-            self._line_state[pid] = {
-                "product": product,
-                "flavors": [],
-                "toppings": [],
-                "flavor_summary": {
-                    "free": free_flavors, "used": 0,
-                    "remainingFree": free_flavors, "extraCount": 0, "charge": Decimal(0),
-                },
-                "topping_summary": {
-                    "free": free_toppings, "used": 0,
-                    "remainingFree": free_toppings, "extraCount": 0, "charge": Decimal(0),
-                },
-            }
-        return self._line_state[pid]
+        NOTE: we no longer expose any ctx argument to the tools, we always
+        use the stored room (self._room) and pass ctx=None to _emit_client_rpc.
+        """
+        rpc_raw = await _emit_client_rpc(
+            None,
+            method,
+            payload,
+            session=self._session,
+            room=self._room,
+        )
 
-    # ------------------------------------------------------------------
-    # Internal: card formatters
-    # ------------------------------------------------------------------
+        rpc_parsed: Optional[Dict[str, Any]] = None
+        if rpc_raw is not None:
+            try:
+                if isinstance(rpc_raw, (str, bytes)):
+                    text = (
+                        rpc_raw.decode("utf-8")
+                        if isinstance(rpc_raw, bytes)
+                        else rpc_raw
+                    )
+                    rpc_parsed = json.loads(text)
+                elif isinstance(rpc_raw, dict):
+                    rpc_parsed = rpc_raw
+                else:
+                    rpc_parsed = {"raw": rpc_raw}
+            except Exception:
+                rpc_parsed = {"raw": rpc_raw}
 
-    def _product_card(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        # store in session state so SESSION_CONTEXT sees it
+        if self._session_state:
+            self._session_state.last_rpc_method = method
+            self._session_state.last_rpc_request = _sanitize_output(payload)
+            self._session_state.last_rpc_response = (
+                _sanitize_output(rpc_parsed) if rpc_parsed else None
+            )
+
+        return rpc_parsed
+
+    def _get_catalog_context(self) -> str:
+        lines = ["# Product Cheat Sheet"]
+        for pid in self._product_order:
+            product = self._products.get(pid)
+            if not product:
+                continue
+            lines.append(f"- {product.get('name')} ({product.get('priceAED')} AED)")
+        return "\n".join(lines)
+
+    async def _publish_overlay_for_ctx(
+        self, kind: str, data: Dict[str, Any]
+    ) -> None:
+        """
+        Helper used by tools to publish overlays.
+        Uses the stored room (self._room) rather than session.room.
+        """
+
+        # State updates
+        if self._session_state:
+            self._session_state.last_overlay_kind = kind
+            self._session_state.last_overlay_payload = data
+            history = self._session_state.overlay_history
+            history.append(kind)
+            if len(history) > 10:
+                history.pop(0)
+
+        await _publish_overlay(
+            session=self._session,
+            kind=kind,
+            data=data,
+            room=self._room,
+        )
+
+    def _canonical_display(self, raw: Optional[str]) -> Optional[str]:
+        if not raw:
+            return None
+        displays = self._kb.get("displays", {})
+        if raw in displays:
+            return displays[raw].get("displayName") or raw
+        for record in displays.values():
+            if record.get("displayName") == raw:
+                return record.get("displayName")
+        return raw
+
+    def _product_allows_flavors(self, product: Optional[Dict[str, Any]]) -> bool:
+        if not product:
+            return False
+        if "allowFlavorSelection" in product:
+            return bool(product.get("allowFlavorSelection"))
+        return bool(product.get("scoops"))
+
+    def _format_product_card(self, p: Dict[str, Any]) -> Dict[str, Any]:
         price = p.get("priceAED")
+        display_name = self._canonical_display(p.get("display"))
         card: Dict[str, Any] = {
             "id": p.get("id"),
             "name": p.get("name"),
@@ -433,153 +690,201 @@ class ScoopTools:
             "scoops": p.get("scoops"),
             "priceAED": round(float(price), 2) if price is not None else None,
             "imageUrl": p.get("imageUrl") or self._kb["image_defaults"]["square"],
-            "display": self._canonical_display(p.get("display")),
+            "display": display_name,
             "includedToppings": p.get("includedToppings"),
-            "allowsFlavorSelection": self._allows_flavors(p),
+            "allowsFlavorSelection": self._product_allows_flavors(p),
         }
+        # Cake-specific fields
         if p.get("category") == "Cakes":
-            card.update(serves=p.get("serves"), cakeBaseFlavor=p.get("cakeBaseFlavor"),
-                        allowCakeMessage=p.get("allowCakeMessage", False))
+            card["serves"] = p.get("serves")
+            card["cakeBaseFlavor"] = p.get("cakeBaseFlavor")
+            card["allowCakeMessage"] = p.get("allowCakeMessage", False)
         return card
 
-    def _flavor_card(self, f: Dict[str, Any]) -> Dict[str, Any]:
+    def _format_flavor_card(self, f: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "id": f["id"], "name": f["name"],
+            "id": f["id"],
+            "name": f["name"],
             "classification": f.get("classification"),
             "imageUrl": f.get("imageUrl") or self._kb["image_defaults"]["square"],
             "dietary": f.get("dietary", []),
-            "available": bool(f.get("available")),
+            "available": bool(f.get("available", True)),
         }
 
-    def _topping_card(self, t: Dict[str, Any]) -> Dict[str, Any]:
+    def _format_topping_card(self, t: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "id": t["id"], "name": t["name"],
+            "id": t["id"],
+            "name": t["name"],
+            "type": t.get("type", "dry"),   # "liquid" | "dry" — used by UI for section grouping
             "priceAED": round(float(t.get("priceAED") or 0.0), 2),
             "imageUrl": t.get("imageUrl") or self._kb["image_defaults"]["square"],
             "dietary": t.get("dietary", []),
         }
 
-    # ------------------------------------------------------------------
-    # Internal: misc helpers
-    # ------------------------------------------------------------------
-
-    def _allows_flavors(self, product: Optional[Dict[str, Any]]) -> bool:
-        if not product:
-            return False
-        if "allowFlavorSelection" in product:
-            return bool(product["allowFlavorSelection"])
-        return bool(product.get("scoops"))
-
-    def _canonical_display(self, raw: Optional[str]) -> Optional[str]:
-        if not raw:
-            return None
-        displays = self._kb.get("displays", {})
-        if raw in displays:
-            return displays[raw].get("displayName") or raw
-        for rec in displays.values():
-            if rec.get("displayName") == raw:
-                return rec["displayName"]
-        return raw
-
-    def _catalog_context(self) -> str:
-        lines = ["# Product Cheat Sheet"]
-        for pid in self._product_order:
-            p = self._products.get(pid)
-            if p:
-                lines.append(f"- {p.get('name')} ({p.get('priceAED')} AED)")
-        return "\n".join(lines)
-
-    def _sundae_upgrade(self, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if product.get("category") != "Cups":
-            return None
-        size, scoops = product.get("size"), product.get("scoops")
-        for p in self._products.values():
-            if (p.get("category") == "Sundae Cups" and p.get("size") == size
-                    and p.get("scoops") == scoops and p.get("available", True)):
-                return p
-        return None
-
-    def _suggest_flavor(self, exclude_ids: set[str]) -> Optional[Dict[str, Any]]:
-        for f in self._flavors.values():
-            if f["id"] not in exclude_ids and f.get("available"):
-                return f
-        return None
-
-    def _suggest_premium_topping(
-        self, exclude_ids: set[str], current_flavors: List[Dict[str, Any]]
+    def _resolve_product(
+        self, product_id: Optional[str], query: Optional[str]
     ) -> Optional[Dict[str, Any]]:
-        flavor_names = " ".join(f.get("name", "") for f in current_flavors).lower()
+        if product_id:
+            return self._products.get(product_id)
+        if query:
+            q = query.lower()
 
-        def score(t: Dict[str, Any]) -> int:
-            name = (t.get("name") or "").lower()
-            s = 3 if float(t.get("priceAED") or 0) >= 6 else 0
-            if "choco" in flavor_names:
-                s += 3 if any(k in name for k in ["choco", "fudge", "nutella", "kitkat", "brownie"]) else 0
-            if any(k in flavor_names for k in ["berry", "strawberry"]):
-                s += 3 if any(k in name for k in ["berry", "strawberry", "rasp"]) else 0
-            if any(k in flavor_names for k in ["vanilla", "classic", "coffee"]):
-                s += 2 if any(k in name for k in ["almond", "pistachio", "caramel", "sprinkle"]) else 0
-            return s
+            # 1) Fast path: simple substring match on name
+            for p in self._products.values():
+                if q in (p.get("name") or "").lower():
+                    return p
 
-        candidates = [
-            (score(t), t) for t in self._toppings.values()
-            if t["id"] not in exclude_ids and t.get("available", True)
-        ]
-        return max(candidates, key=lambda x: x[0])[1] if candidates else None
+            # 2) Token-based match to catch hyphen/spacing differences
+            q_tokens = _tokens_for_label(query)
+            if q_tokens:
+                # Build product token cache lazily
+                def product_tokens(pid: str, prod: Dict[str, Any]) -> set[str]:
+                    if pid in self._product_tokens_cache:
+                        return self._product_tokens_cache[pid]
 
-    # ------------------------------------------------------------------
-    # Internal: overlay + rpc shortcut (used by every tool)
-    # ------------------------------------------------------------------
+                    tokens = set()
+                    tokens |= _tokens_for_label(prod.get("name"))
+                    tokens |= _tokens_for_label(prod.get("category"))
+                    tokens |= _tokens_for_label(prod.get("size"))
 
-    async def _emit(self, kind: str, data: Dict[str, Any], rpc_method: Optional[str] = None,
-                    rpc_payload: Optional[Dict[str, Any]] = None) -> Optional[str]:
-        """Publish overlay and optionally send RPC. Returns parsed RPC response or None."""
-        # Update session state
-        self._state.last_overlay_kind = kind
-        h = self._state.overlay_history
-        h.append(kind)
-        if len(h) > 10:
-            del h[0]
+                    # Add common aliases to improve quick-order recognition
+                    cat = (prod.get("category") or "").lower()
+                    if "milk" in cat or "shake" in cat:
+                        tokens.update({"shake", "milkshake", "milkshakes"})
+                    if "sundae" in cat:
+                        tokens.add("sundae")
+                    if "cup" in cat:
+                        tokens.add("cup")
 
-        await _publish_overlay(self._room, kind, data)
+                    self._product_tokens_cache[pid] = tokens
+                    return tokens
 
-        if rpc_method is not None:
-            return await _rpc(self._room, rpc_method, rpc_payload or {})
+                best_pid: Optional[str] = None
+                best_score = 0
+
+                for pid, prod in self._products.items():
+                    tokens = product_tokens(pid, prod)
+                    score = len(tokens & q_tokens)
+                    if score > best_score:
+                        best_score = score
+                        best_pid = pid
+                    elif score == best_score and best_pid:
+                        # Tie-breaker: keep existing product order priority
+                        try:
+                            if (
+                                self._product_order.index(pid)
+                                < self._product_order.index(best_pid)
+                            ):
+                                best_pid = pid
+                        except ValueError:
+                            pass
+
+                if best_pid and best_score > 0:
+                    return self._products.get(best_pid)
         return None
 
-    def _detail_overlay_data(self, product: Dict[str, Any], line: Dict[str, Any]) -> Dict[str, Any]:
-        """Build the detail card payload (shared between list_menu, choose_flavors, choose_toppings)."""
-        flavors = line["flavors"]
-        toppings = line["toppings"]
-        fs = line["flavor_summary"]
-        ts = line["topping_summary"]
-        free_f = int(fs["free"])
+    def _get_or_create_line_state(self, product: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Retrieve or create the current "build" state for a given product ID.
+        One active line state per product ID per session.
+        """
+        pid = product["id"]
+        if pid not in self._line_state:
+            self._line_state[pid] = {
+                "product": product,
+                "flavors": [],  # no default vanilla, empty until choose_flavors is called
+                "toppings": [],
+                "flavor_summary": {
+                    "free": int(product.get("scoops") or 0),
+                    "used": 0,
+                    "remainingFree": int(product.get("scoops") or 0),
+                    "extraCount": 0,
+                    "charge": Decimal(0),
+                },
+                "topping_summary": {
+                    "free": int(product.get("includedToppings") or 0),
+                    "used": 0,
+                    "remainingFree": int(product.get("includedToppings") or 0),
+                    "extraCount": 0,
+                    "charge": Decimal(0),
+                },
+            }
+        return self._line_state[pid]
 
-        sel_flavors = [
-            {**self._flavor_card(f), "isExtra": idx >= free_f}
-            for idx, f in enumerate(flavors)
-        ]
-        free_t = int(ts["free"])
-        sel_toppings = [
-            {**self._topping_card(t), "isFree": idx < free_t}
-            for idx, t in enumerate(toppings)
-        ]
-        return {
-            "view": "detail",
-            "product": self._product_card(product),
-            "selectedFlavors": _clean(sel_flavors),
-            "selectedToppings": _clean(sel_toppings),
-            "flavorSummary": _clean(fs),
-            "toppingSummary": _clean(ts),
-            "contextProductId": product["id"],
-            "cartSummary": self._cart_summary or None,
-        }
+    def _map_size_alias(self, size: Optional[str]) -> Optional[str]:
+        if not size:
+            return None
+        return self.SIZE_ALIAS.get(size.lower(), size.title())
 
-    # ==================================================================
-    # TOOLS
-    # ==================================================================
+    def _resolve_flavor(self, ref: str) -> Optional[Dict[str, Any]]:
+        # Direct id or exact name match
+        direct = self._flavors.get(ref) or next(
+            (f for f in self._flavors.values() if f["name"].lower() == ref.lower()),
+            None,
+        )
+        if direct:
+            return direct
 
-    @function_tool(name="list_menu", description="Render menu overlays. kind='products'|'flavors'|'toppings'.")
+        # Token-based match to handle partial names ("almond", "praline", etc.)
+        ref_tokens = _tokens_for_label(ref)
+        if not ref_tokens:
+            return None
+
+        def flavor_tokens(fid: str, flavor: Dict[str, Any]) -> set[str]:
+            if fid in self._flavor_tokens_cache:
+                return self._flavor_tokens_cache[fid]
+            tokens = _tokens_for_label(flavor.get("name"))
+            self._flavor_tokens_cache[fid] = tokens
+            return tokens
+
+        best_id: Optional[str] = None
+        best_score = 0
+        for fid, flavor in self._flavors.items():
+            tokens = flavor_tokens(fid, flavor)
+            score = len(tokens & ref_tokens)
+            if score > best_score:
+                best_score = score
+                best_id = fid
+
+        return self._flavors.get(best_id) if best_id and best_score > 0 else None
+
+    def _resolve_topping(self, ref: str) -> Optional[Dict[str, Any]]:
+        # Direct id or exact name match
+        direct = self._toppings.get(ref) or next(
+            (t for t in self._toppings.values() if t["name"].lower() == ref.lower()),
+            None,
+        )
+        if direct:
+            return direct
+
+        # Token-based match to handle partial names ("almonds", "hot fudge", "sprinkles")
+        ref_tokens = _tokens_for_label(ref)
+        if not ref_tokens:
+            return None
+
+        def topping_tokens(tid: str, topping: Dict[str, Any]) -> set[str]:
+            if tid in self._topping_tokens_cache:
+                return self._topping_tokens_cache[tid]
+            tokens = _tokens_for_label(topping.get("name"))
+            self._topping_tokens_cache[tid] = tokens
+            return tokens
+
+        best_id: Optional[str] = None
+        best_score = 0
+        for tid, topping in self._toppings.items():
+            tokens = topping_tokens(tid, topping)
+            score = len(tokens & ref_tokens)
+            if score > best_score:
+                best_score = score
+                best_id = tid
+
+        return self._toppings.get(best_id) if best_id and best_score > 0 else None
+
+    # --- MODIFIED TOOLS: CLEAN SCHEMA (NO ctx, OPTIONAL ARGS) ---
+    @function_tool(
+        name="list_menu",
+        description="Render menu overlays. kind='products'|'flavors'|'toppings'.",
+    )
     async def list_menu(
         self,
         kind: Literal["products", "flavors", "toppings"] = "products",
@@ -590,312 +895,802 @@ class ScoopTools:
         product_id: Optional[str] = None,
         confirmed: bool = False,
     ) -> Dict[str, Any]:
-        kind = (kind or "").strip().lower()
 
-        # ── PRODUCTS ───────────────────────────────────────────────────
-        if kind == "products":
+        logger.info(
+            "[TOOL] list_menu CALLED | kind=%s | category=%s | size=%s | product_id=%s | view=%s | query=%s",
+            kind,
+            category,
+            size,
+            product_id,
+            view,
+            query,
+        )
+
+        kind_normalized = (kind or "").strip().lower()
+
+        # =====================================================
+        # PRODUCTS OVERLAY
+        # =====================================================
+        if kind_normalized == "products":
             view_mode = view or "grid"
-            target: Optional[Dict[str, Any]] = None
+            payload: Dict[str, Any] = {}
+            target_product: Optional[Dict[str, Any]] = None
 
+            # DETAIL VIEW
             if view_mode == "detail" or product_id:
-                target = self._resolve_product(product_id, None) if product_id else \
-                         self._resolve_product(None, query) if query else \
-                         self._products.get(self._active_product_id) if self._active_product_id else None
+                # resolve using explicit product_id first, then query, then active
+                if product_id:
+                    target_product = self._resolve_product(product_id, None)
+                elif query:
+                    target_product = self._resolve_product(None, query)
+                elif self._active_product_id:
+                    target_product = self._resolve_product(self._active_product_id, None)
 
-                # Quick-order: require verbal confirmation first
-                if query and not product_id and not confirmed and target:
-                    return _clean({
-                        "status": "needs_confirmation",
-                        "productId": target["id"],
-                        "productName": target["name"],
-                        "agentNote": "Confirm the item with the guest before showing the detail card.",
-                    })
+                # For quick-order with query, require confirmation before showing detail
+                if query and not product_id and not confirmed and target_product:
+                    return _sanitize_output(
+                        {
+                            "status": "needs_confirmation",
+                            "productId": target_product.get("id"),
+                            "productName": target_product.get("name"),
+                            "agentNote": "Confirm the item with the guest before showing the detail card.",
+                        }
+                    )
 
-                if target:
-                    self._active_product_id = target["id"]
-                    self._state.current_product_id = target["id"]
-                    line = self._line(target)
-                    payload = {"kind": "products", **self._detail_overlay_data(target, line)}
+                if target_product:
+                    self._active_product_id = target_product.get("id")
+
+                    line = self._get_or_create_line_state(target_product)
+                    flavors_for_line = line.get("flavors", [])
+                    toppings_for_line = line.get("toppings", [])
+                    flavor_summary = line.get("flavor_summary", {}) or {}
+                    topping_summary = line.get("topping_summary", {}) or {}
+
+                    selected_flavors = [
+                        {
+                            "id": f["id"],
+                            "name": f["name"],
+                            "classification": f.get("classification"),
+                            "imageUrl": f.get("imageUrl"),
+                            "isExtra": idx >= int(flavor_summary.get("free", 0)),
+                        }
+                        for idx, f in enumerate(flavors_for_line)
+                    ]
+                    selected_toppings = [
+                        {
+                            "id": t["id"],
+                            "name": t["name"],
+                            "priceAED": float(t.get("priceAED") or 0.0),
+                            "imageUrl": t.get("imageUrl"),
+                            "isFree": idx < int(topping_summary.get("free", 0)),
+                        }
+                        for idx, t in enumerate(toppings_for_line)
+                    ]
+
+                    flavor_note = None
+                    if flavor_summary:
+                        used = int(flavor_summary.get("used", 0))
+                        free_slots = int(flavor_summary.get("free", 0))
+                        extra_count = max(0, used - free_slots)
+                        charge = float(flavor_summary.get("charge", 0) or 0)
+                        flavor_note = {
+                            "label": f"{used} flavor(s) selected ({extra_count} extra)",
+                            "extraNote": (
+                                f"Extra flavor charge: {charge:.2f} dirham"
+                                if charge > 0
+                                else None
+                            ),
+                        }
+
+                    topping_note = None
+                    if topping_summary:
+                        used = int(topping_summary.get("used", 0))
+                        free_slots = int(topping_summary.get("free", 0))
+                        extra_count = max(0, used - free_slots)
+                        charge = float(topping_summary.get("charge", 0) or 0)
+                        topping_note = {
+                            "label": f"{used} topping(s) selected ({extra_count} extra)",
+                            "extraNote": (
+                                f"Extra topping charge: {charge:.2f} dirham"
+                                if charge > 0
+                                else None
+                            ),
+                        }
+
+                    payload = {
+                        "kind": "products",
+                        "view": "detail",
+                        "product": self._format_product_card(target_product),
+                        "selectedFlavors": _sanitize_output(selected_flavors),
+                        "selectedToppings": _sanitize_output(selected_toppings),
+                        "flavorSummary": _sanitize_output(flavor_note)
+                        if flavor_note
+                        else None,
+                        "toppingSummary": _sanitize_output(topping_note)
+                        if topping_note
+                        else None,
+                        "contextProductId": target_product.get("id"),
+                        "cartSummary": self._cart_summary or None,
+                    }
                     view_mode = "detail"
                 else:
                     view_mode = "grid"
 
+            # GRID VIEW
             if view_mode == "grid":
                 prods = [
-                    self._product_card(p) for p in self._products.values()
-                    if not category or p.get("category") == category
+                    self._format_product_card(p)
+                    for p in self._products.values()
+                    if (not category or p.get("category") == category)
                 ]
-                payload = {"kind": "products", "view": "grid", "products": prods,
-                           "category": category or "All", "size": size, "query": query,
-                           "cartSummary": self._cart_summary or None}
+                payload = {
+                    "kind": "products",
+                    "view": "grid",
+                    "products": prods,
+                    "category": category or "All",
+                    "size": size,
+                    "query": query,
+                    "cartSummary": self._cart_summary or None,
+                }
 
-            await self._emit(
-                "products", payload,
-                rpc_method="client.menuLoaded",
-                rpc_payload={"view": view_mode,
-                              "category": category or "All",
-                              "productId": target["id"] if target else None,
-                              "productName": target["name"] if target else None},
+            # Publish overlay (full data for UI)
+            await self._publish_overlay_for_ctx("products", payload)
+
+            # RPC
+            rpc_payload = {
+                "view": view_mode,
+                "category": category or "All",
+                "productId": target_product.get("id") if target_product else None,
+                "productName": target_product.get("name") if target_product else None,
+            }
+            ui_rpc = await self._rpc_with_context("client.menuLoaded", rpc_payload)
+
+            logger.info(
+                "[TOOL] list_menu OUTPUT → view=%s | product_count=%d",
+                view_mode,
+                len(payload.get("products", []))
+                if isinstance(payload.get("products"), list)
+                else 1,
             )
-            return _clean(payload)
 
-        # ── FLAVORS / TOPPINGS ─────────────────────────────────────────
-        if kind in ("flavors", "toppings"):
-            pid = product_id or self._active_product_id
-            product = self._products.get(pid) if pid else None
-            line = self._line(product) if product else None
-
-            if kind == "flavors":
-                if not product or not self._allows_flavors(product):
-                    return _clean({
-                        "error": "flavor_selection_not_available",
-                        "productId": pid,
-                        "agentNote": "Flavor selection is not available. Proceed to toppings.",
-                    })
-                fs = line["flavor_summary"]
-                free_f = int(fs["free"])
-                flavors_list = line["flavors"]
-                sel_ids = [f["id"] for f in flavors_list]
-                sel = [{**self._flavor_card(f), "isExtra": idx >= free_f} for idx, f in enumerate(flavors_list)]
-                payload = {
-                    "kind": "flavors", "productId": pid,
-                    "productName": product["name"],
-                    "freeFlavors": free_f,
-                    "selectedFlavorIds": sel_ids, "selectedFlavors": sel,
-                    "usedFreeFlavors": min(len(flavors_list), free_f),
-                    "extraFlavorCount": max(0, len(flavors_list) - free_f),
-                    "flavors": [self._flavor_card(f) for f in self._flavors.values()],
+            # Return a lightweight summary to the LLM — full card data is already
+            # in the overlay so there is no need to send imageUrls and descriptions
+            # back through the LLM context (saves ~1-2k tokens per tool call).
+            if view_mode == "grid":
+                llm_return: Dict[str, Any] = {
+                    "status": "menu_shown",
+                    "view": "grid",
+                    "category": category or "All",
+                    "count": len(payload.get("products", [])),
+                    "products": [
+                        {"id": p["id"], "name": p["name"], "priceAED": p["priceAED"],
+                         "scoops": p.get("scoops"), "size": p.get("size"),
+                         "category": p.get("category"), "serves": p.get("serves")}
+                        for p in payload.get("products", [])
+                    ],
                 }
-            else:  # toppings
-                free_t = int(product.get("includedToppings") or 0) if product else 0
+            else:
+                tp = target_product or {}
+                llm_return = {
+                    "status": "detail_shown",
+                    "view": "detail",
+                    "productId": tp.get("id"),
+                    "productName": tp.get("name"),
+                    "priceAED": tp.get("priceAED"),
+                    "scoops": tp.get("scoops"),
+                    "size": tp.get("size"),
+                    "category": tp.get("category"),
+                    "includedToppings": tp.get("includedToppings"),
+                    "allowsFlavorSelection": self._product_allows_flavors(tp),
+                    "selectedFlavors": [f["name"] for f in (self._line_state.get(tp.get("id") or "", {}).get("flavors") or [])],
+                    "selectedToppings": [t["name"] for t in (self._line_state.get(tp.get("id") or "", {}).get("toppings") or [])],
+                }
+            llm_return["uiRpc"] = ui_rpc
+            return _sanitize_output(llm_return)
+
+        # =====================================================
+        # FLAVORS / TOPPINGS
+        # =====================================================
+        if kind_normalized in ["flavors", "toppings"]:
+            target_product_id = product_id or self._active_product_id
+            target_product = (
+                self._products.get(target_product_id) if target_product_id else None
+            )
+            line = self._get_or_create_line_state(target_product) if target_product else None
+
+            if kind_normalized == "flavors":
+                if not target_product or not self._product_allows_flavors(target_product):
+                    note = "Flavor selection is not available for this product. Please proceed with toppings only."
+                    logger.info(
+                        "[TOOL] list_menu skipping flavors for product=%s | reason=disallowed",
+                        target_product_id,
+                    )
+                    return _sanitize_output(
+                        {
+                            "error": "flavor_selection_not_available",
+                            "productId": target_product_id,
+                            "productName": target_product.get("name")
+                            if target_product
+                            else None,
+                            "agentNote": note,
+                        }
+                    )
+
+                cards = [self._format_flavor_card(f) for f in self._flavors.values()]
+                free_slots = 0
+                used = 0
+                extra_count = 0
+                selected_ids: List[str] = []
+                selected_flavors: List[Dict[str, Any]] = []
+
                 if line:
-                    free_t = int(line["topping_summary"]["free"])
-                toppings_list = line["toppings"] if line else []
-                sel_ids = [t["id"] for t in toppings_list]
-                sel = [{**self._topping_card(t), "isFree": idx < free_t} for idx, t in enumerate(toppings_list)]
+                    flavor_summary = line.get("flavor_summary", {}) or {}
+                    free_slots = int(
+                        flavor_summary.get(
+                            "free",
+                            int(target_product.get("scoops") or 0)
+                            if target_product
+                            else 0,
+                        )
+                    )
+                    used = len(line.get("flavors", []))
+                    extra_count = max(0, used - free_slots)
+
+                    for idx, f in enumerate(line.get("flavors", [])):
+                        selected_ids.append(f["id"])
+                        selected_flavors.append(
+                            {
+                                "id": f["id"],
+                                "name": f["name"],
+                                "classification": f.get("classification"),
+                                "imageUrl": f.get("imageUrl"),
+                                "isExtra": idx >= free_slots,
+                            }
+                        )
+
                 payload = {
-                    "kind": "toppings", "productId": pid,
-                    "productName": product["name"] if product else None,
-                    "freeToppings": free_t,
-                    "freeToppingsRemaining": max(0, free_t - len(toppings_list)),
-                    "selectedToppingIds": sel_ids, "selectedToppings": sel,
-                    "toppings": [self._topping_card(t) for t in self._toppings.values()],
+                    "kind": "flavors",
+                    "productId": target_product_id,
+                    "productName": target_product.get("name")
+                    if target_product
+                    else None,
+                    "freeFlavors": free_slots,
+                    "maxFlavors": free_slots
+                    or used
+                    or (target_product.get("scoops") if target_product else 0),
+                    "selectedFlavorIds": selected_ids,
+                    "selectedFlavors": selected_flavors,
+                    "usedFreeFlavors": min(used, free_slots),
+                    "extraFlavorCount": extra_count,
+                    "flavors": cards,
                 }
 
-            await self._emit(kind, payload,
-                             rpc_method=f"client.{kind}Loaded",
-                             rpc_payload={"productId": pid})
-            return _clean(payload)
+            else:  # toppings
+                cards = [self._format_topping_card(t) for t in self._toppings.values()]
+                free_slots = (
+                    int(target_product.get("includedToppings") or 0)
+                    if target_product
+                    else 0
+                )
+                selected_ids: List[str] = []
+                selected_toppings: List[Dict[str, Any]] = []
+                free_remaining = 0
+
+                if line:
+                    topping_summary = line.get("topping_summary", {}) or {}
+                    free_slots = int(topping_summary.get("free", free_slots))
+                    used = len(line.get("toppings", []))
+                    free_remaining = max(0, free_slots - used)
+
+                    for idx, t in enumerate(line.get("toppings", [])):
+                        selected_ids.append(t["id"])
+                        selected_toppings.append(
+                            {
+                                "id": t["id"],
+                                "name": t["name"],
+                                "priceAED": float(t.get("priceAED") or 0.0),
+                                "imageUrl": t.get("imageUrl"),
+                                "isFree": idx < free_slots,
+                            }
+                        )
+
+                payload = {
+                    "kind": "toppings",
+                    "productId": target_product_id,
+                    "productName": target_product.get("name")
+                    if target_product
+                    else None,
+                    "category": target_product.get("category") if target_product else None,
+                    "note": "Extra toppings cost 5 or 6 dirham each.",
+                    "freeToppings": free_slots,
+                    "freeToppingsRemaining": free_remaining,
+                    "selectedToppingIds": selected_ids,
+                    "selectedToppings": selected_toppings,
+                    "toppings": cards,
+                }
+
+            await self._publish_overlay_for_ctx(kind_normalized, payload)
+
+            rpc_payload = {
+                "productId": target_product_id,
+                "count": len(
+                    payload.get(
+                        "flavors" if kind_normalized == "flavors" else "toppings", []
+                    )
+                ),
+            }
+            ui_rpc = await self._rpc_with_context(
+                f"client.{kind_normalized}Loaded",
+                rpc_payload,
+            )
+
+            # Return lightweight summary to LLM — full card data is in the overlay.
+            if kind_normalized == "flavors":
+                fl_summary = line.get("flavor_summary", {}) if line else {}
+                llm_flavor_return: Dict[str, Any] = {
+                    "status": "flavor_menu_shown",
+                    "productId": target_product_id,
+                    "freeFlavors": payload.get("freeFlavors", 0),
+                    "selectedFlavors": [f["name"] for f in (line.get("flavors", []) if line else [])],
+                    "remainingFree": fl_summary.get("remainingFree", payload.get("freeFlavors", 0)),
+                    "availableFlavors": [f["name"] for f in self._flavors.values() if f.get("available", True)],
+                }
+                llm_flavor_return["uiRpc"] = ui_rpc
+                return _sanitize_output(llm_flavor_return)
+            else:
+                tp_summary = line.get("topping_summary", {}) if line else {}
+                llm_topping_return: Dict[str, Any] = {
+                    "status": "topping_menu_shown",
+                    "productId": target_product_id,
+                    "freeToppings": payload.get("freeToppings", 0),
+                    "freeToppingsRemaining": payload.get("freeToppingsRemaining", 0),
+                    "selectedToppings": [t["name"] for t in (line.get("toppings", []) if line else [])],
+                    "availableToppings": [
+                        {"name": t["name"], "type": t.get("type", "dry"), "priceAED": t.get("priceAED")}
+                        for t in self._toppings.values()
+                        if t.get("available", True)
+                    ],
+                }
+                llm_topping_return["uiRpc"] = ui_rpc
+                return _sanitize_output(llm_topping_return)
 
         return {"error": "invalid kind"}
 
-    @function_tool(name="choose_flavors", description="Attach selected flavors to product.")
-    async def choose_flavors(self, product_id: str, flavor_ids: List[str]) -> Dict[str, Any]:
+    @function_tool(
+        name="choose_flavors", description="Attach selected flavors to product."
+    )
+    async def choose_flavors(
+        self,
+        product_id: str,
+        flavor_ids: List[str],
+    ) -> Dict[str, Any]:
+        # Keep the active product in sync so subsequent detail refreshes target the same item
         self._active_product_id = product_id
         product = self._products.get(product_id)
         if not product:
-            return {"error": f"Unknown product: {product_id}"}
-        if not self._allows_flavors(product):
-            return _clean({"status": "Flavor selection unavailable", "productId": product_id,
-                           "agentNote": "Offer toppings instead; they are charged."})
+            return {"error": "Unknown product"}
 
-        line = self._line(product)
-        resolved = [f for ref in flavor_ids if (f := self._resolve_flavor(ref))]
-        line["flavors"] = resolved
-
-        fs = line["flavor_summary"]
-        free = int(fs["free"])
-        used = len(resolved)
-        extra = max(0, used - free)
-        charge = self._extra_flavor_price * Decimal(extra)
-        fs.update(used=used, remainingFree=max(0, free - used), extraCount=extra, charge=charge)
-
-        # Refresh UI detail card
-        await self._emit("products", {"kind": "products", **self._detail_overlay_data(product, line)})
-
-        # Upsell logic
-        used_ids = {f["id"] for f in resolved}
-        suggestion = self._suggest_flavor(used_ids)
-        remaining = max(0, free - used)
-        if suggestion and remaining > 0:
-            upsell = f"You still have {remaining} free flavor slot(s). {suggestion['name']} would be a great addition — still free!"
-        elif suggestion and remaining == 0:
-            upsell = f"Slots full. Swap one for {suggestion['name']}?"
-        else:
-            upsell = None
-
-        names = ", ".join(f["name"] for f in resolved) or "none"
-        agent_note = (
-            f"Added {used} flavor(s): {names}. "
-            f"{remaining} free slot(s) remaining. Extra charge: {float(charge):.2f} dirham."
-        )
-        if upsell:
-            agent_note += f" {upsell}"
-
-        return _clean({
-            "status": "Flavors updated", "productId": product_id,
-            "flavors": [f["id"] for f in resolved],
-            "flavorSummary": fs, "agentNote": agent_note,
-        })
-
-    @function_tool(name="choose_toppings", description="Attach selected toppings to product.")
-    async def choose_toppings(self, product_id: str, topping_ids: List[str]) -> Dict[str, Any]:
-        self._active_product_id = product_id
-        product = self._products.get(product_id)
-        if not product:
-            return {"error": f"Unknown product: {product_id}"}
-
-        line = self._line(product)
-        resolved = [t for ref in topping_ids if (t := self._resolve_topping(ref))]
-        line["toppings"] = resolved
-
-        ts = line["topping_summary"]
-        free = int(ts["free"])
-        used = len(resolved)
-        chargeable = resolved[free:]
-        charge = sum(Decimal(str(t.get("priceAED", 0))) for t in chargeable)
-        remaining = max(0, free - used)
-        ts.update(used=used, remainingFree=remaining, extraCount=max(0, used - free), charge=charge)
-
-        # Refresh UI
-        await self._emit("products", {"kind": "products", **self._detail_overlay_data(product, line)})
-
-        # Sundae Cup upgrade hint
-        upgrade_hint = None
-        if product.get("category") == "Cups" and used > free:
-            sundae = self._sundae_upgrade(product)
-            if sundae:
-                diff = Decimal(str(sundae.get("priceAED", 0))) - Decimal(str(product.get("priceAED", 0)))
-                upgrade_data = {
-                    "kind": "upgrade", "show": True,
-                    "fromProduct": _clean(self._product_card(product)),
-                    "toProduct": {**_clean(self._product_card(sundae)),
-                                  "headline": f"Upgrade to {sundae['name']}",
-                                  "subline": "Toppings included with Sundae Cups."},
-                    "priceDiffAED": _clean(diff), "savingsEstimateAED": _clean(charge),
+        if not self._product_allows_flavors(product):
+            agent_note = (
+                "Flavor selection is locked for this item. Offer toppings instead; toppings are charged."
+            )
+            return _sanitize_output(
+                {
+                    "status": "Flavor selection unavailable",
+                    "productId": product_id,
+                    "agentNote": agent_note,
                 }
-                await self._emit("upgrade", upgrade_data)
-                upgrade_hint = (f"Upgrade to {sundae['name']} for {float(diff):.2f} dirham — "
-                                "toppings become included.")
-
-        # Topping upsell
-        used_ids = {t["id"] for t in resolved}
-        suggestion = self._suggest_premium_topping(used_ids, line["flavors"])
-        topping_upsell = None
-        if suggestion:
-            topping_upsell = (
-                f"{suggestion['name']} would go great! Add it free?" if remaining > 0
-                else f"Swap one topping for {suggestion['name']}?"
             )
 
-        names = ", ".join(t["name"] for t in resolved) or "none"
-        agent_note = (
-            f"Added {used} topping(s): {names}. "
-            f"{remaining} free slot(s) remaining. Extra charge: {float(charge):.2f} dirham."
+        line = self._get_or_create_line_state(product)
+
+        resolved_flavors: List[Dict[str, Any]] = []
+        for fid in flavor_ids:
+            f = self._resolve_flavor(fid)
+            if f:
+                resolved_flavors.append(f)
+
+        # Even if empty, we respect it and clear previous selections
+        line["flavors"] = resolved_flavors
+
+        flavor_summary = line.get("flavor_summary", {}) or {}
+        free_slots = int(flavor_summary.get("free", int(product.get("scoops") or 0)))
+        used = len(resolved_flavors)
+        extra_count = max(0, used - free_slots)
+
+        extra_price_per = self._extra_flavor_price
+        extra_charge = extra_price_per * Decimal(extra_count)
+
+        remaining_free = max(free_slots - used, 0)
+
+        flavor_summary["free"] = free_slots
+        flavor_summary["used"] = used
+        flavor_summary["remainingFree"] = remaining_free
+        flavor_summary["extraCount"] = extra_count
+        flavor_summary["charge"] = extra_charge
+        line["flavor_summary"] = flavor_summary
+
+        # Pull current toppings so the detail card stays fully populated
+        current_toppings = line.get("toppings", [])
+        topping_summary = line.get("topping_summary", {}) or {}
+
+        # Update detail product overlay
+        await self._publish_overlay_for_ctx(
+            "products",
+            {
+                "view": "detail",
+                "product": self._format_product_card(product),
+                "selectedFlavors": [
+                    _sanitize_output(self._format_flavor_card(f))
+                    for f in resolved_flavors
+                ],
+                "flavorSummary": _sanitize_output(flavor_summary),
+                "selectedToppings": [
+                    _sanitize_output(self._format_topping_card(t))
+                    for t in current_toppings
+                ],
+                "toppingSummary": _sanitize_output(topping_summary)
+                if topping_summary
+                else None,
+            },
         )
-        if upgrade_hint:
-            agent_note += f" {upgrade_hint}"
-        if topping_upsell:
-            agent_note += f" {topping_upsell}"
 
-        return _clean({
-            "status": "Toppings updated", "productId": product_id,
-            "toppings": [t["id"] for t in resolved],
-            "toppingSummary": ts, "agentNote": agent_note,
-            "upgradeHint": upgrade_hint, "toppingUpsellHint": topping_upsell,
-        })
+        # Human-readable note for the LLM to speak out
+        flavor_names = ", ".join(f["name"] for f in resolved_flavors) or "no flavors"
+        agent_note = (
+            f"I have added {used} flavor(s): {flavor_names}. "
+            f"You have {remaining_free} free flavor(s) remaining. "
+            f"Extra flavor charge is {float(extra_charge):.2f} dirham."
+        )
+        upsell_hint = None
+        flavor_upsell_suggestion = None
+        suggested_flavor = self._suggest_flavor({f.get("id") for f in resolved_flavors})
+        if remaining_free > 0 and suggested_flavor:
+            upsell_hint = (
+                f"You still have free flavor slots. Suggest adding {suggested_flavor.get('name')} for free."
+            )
+            flavor_upsell_suggestion = {
+                "type": "add",
+                "flavor": self._format_flavor_card(suggested_flavor),
+                "extraPriceAED": 0.0,
+            }
+        elif remaining_free == 0 and suggested_flavor:
+            upsell_hint = (
+                f"Flavors are full; propose swapping one for {suggested_flavor.get('name')} or adding it for "
+                f"{float(extra_price_per):.2f} dirham."
+            )
+            flavor_upsell_suggestion = {
+                "type": "swap_or_add",
+                "flavor": self._format_flavor_card(suggested_flavor),
+                "extraPriceAED": _sanitize_output(extra_price_per),
+            }
+        if upsell_hint:
+            agent_note = f"{agent_note} {upsell_hint}"
 
-    @function_tool(name="add_to_cart", description="Finalize product and add to cart.")
-    async def add_to_cart(self, product_id: str, qty: int = 1) -> Dict[str, Any]:
+        return _sanitize_output(
+            {
+                "status": "Flavors updated",
+                "productId": product_id,
+                "flavors": [f["id"] for f in resolved_flavors],
+                "flavorSummary": flavor_summary,
+                "agentNote": agent_note,
+                "flavorUpsellHint": upsell_hint,
+                "flavorUpsellSuggestion": flavor_upsell_suggestion,
+            }
+        )
+
+    @function_tool(name="choose_toppings", description="Attach selected toppings.")
+    async def choose_toppings(
+        self,
+        product_id: str,
+        topping_ids: List[str],
+    ) -> Dict[str, Any]:
+        self._active_product_id = product_id
         product = self._products.get(product_id)
         if not product:
-            return {"error": f"Unknown product: {product_id}"}
+            return {"error": "Unknown product"}
+
+        line = self._get_or_create_line_state(product)
+
+        resolved_toppings: List[Dict[str, Any]] = []
+        for tid in topping_ids:
+            t = self._resolve_topping(tid)
+            if t:
+                resolved_toppings.append(t)
+
+        line["toppings"] = resolved_toppings
+
+        topping_summary = line.get("topping_summary", {}) or {}
+        free_slots = int(
+            topping_summary.get("free", int(product.get("includedToppings") or 0))
+        )
+        used = len(resolved_toppings)
+        extra_count = max(0, used - free_slots)
+
+        extra_charge = Decimal(0)
+        if extra_count > 0:
+            # charge only toppings beyond free slots
+            chargeable_toppings = resolved_toppings[free_slots:]
+            for t in chargeable_toppings:
+                price = Decimal(str(t.get("priceAED", 0.0)))
+                extra_charge += price
+
+        remaining_free = max(free_slots - used, 0)
+
+        topping_summary["free"] = free_slots
+        topping_summary["used"] = used
+        topping_summary["remainingFree"] = remaining_free
+        topping_summary["extraCount"] = extra_count
+        topping_summary["charge"] = extra_charge
+        line["topping_summary"] = topping_summary
+
+        current_flavors = line.get("flavors", [])
+        flavor_summary = line.get("flavor_summary", {}) or {}
+
+        await self._publish_overlay_for_ctx(
+            "products",
+            {
+                "view": "detail",
+                "product": self._format_product_card(product),
+                "selectedToppings": [
+                    _sanitize_output(self._format_topping_card(t))
+                    for t in resolved_toppings
+                ],
+                "toppingSummary": _sanitize_output(topping_summary),
+                "selectedFlavors": [
+                    _sanitize_output(self._format_flavor_card(f))
+                    for f in current_flavors
+                ],
+                "flavorSummary": _sanitize_output(flavor_summary)
+                if flavor_summary
+                else None,
+            },
+        )
+
+        topping_names = ", ".join(t["name"] for t in resolved_toppings) or "no toppings"
+        agent_note = (
+            f"I have added {used} topping(s): {topping_names}. "
+            f"You have {remaining_free} free topping(s) remaining. "
+            f"Extra topping charge is {float(extra_charge):.2f} dirham."
+        )
+        upgrade_hint = None
+        upgrade_overlay: Optional[Dict[str, Any]] = None
+        # Deterministic Sundae upsell when a Cup has paid toppings beyond included slots.
+        if product.get("category") == "Cups" and extra_count > 0:
+            sundae_option = self._find_sundae_upgrade(product)
+            price_diff = None
+            if sundae_option:
+                price_diff = Decimal(str(sundae_option.get("priceAED", 0))) - Decimal(
+                    str(product.get("priceAED", 0))
+                )
+                upgrade_overlay = {
+                    "kind": "upgrade",
+                    "show": True,
+                    "fromProduct": self._format_product_card(product),
+                    "toProduct": {
+                        **self._format_product_card(sundae_option),
+                        "headline": f"Upgrade to {sundae_option.get('name')}",
+                        "subline": "Toppings included with Sundae Cups.",
+                    },
+                    "priceDiffAED": _sanitize_output(price_diff),
+                    "savingsEstimateAED": _sanitize_output(extra_charge),
+                }
+                await self._publish_overlay_for_ctx("upgrade", upgrade_overlay)
+            upgrade_hint = (
+                "This is a Cup with paid toppings. Offer an upgrade to a Sundae Cup for better value "
+                "since toppings are included there."
+            )
+            if sundae_option and price_diff is not None:
+                upgrade_hint = (
+                    f"Upgrade to {sundae_option.get('name')} for about {float(price_diff):.2f} dirham; "
+                    "toppings become included."
+                )
+            agent_note = f"{agent_note} {upgrade_hint}"
+
+        topping_upsell_hint = None
+        suggested_top = self._suggest_premium_topping(
+            {t.get("id") for t in resolved_toppings}, current_flavors
+        )
+        if remaining_free > 0 and suggested_top:
+            topping_upsell_hint = (
+                f"{suggested_top.get('name')} would pair nicely with these flavors. Want me to add it for free?"
+            )
+        elif remaining_free == 0 and suggested_top:
+            topping_upsell_hint = (
+                f"{suggested_top.get('name')} would taste great here. I can replace one of the current toppings with it. Should I go ahead?"
+            )
+        if topping_upsell_hint:
+            agent_note = f"{agent_note} {topping_upsell_hint}"
+
+        return _sanitize_output(
+            {
+                "status": "Toppings updated",
+                "productId": product_id,
+                "toppings": [t["id"] for t in resolved_toppings],
+                "toppingSummary": topping_summary,
+                "agentNote": agent_note,
+                "upgradeHint": upgrade_hint,
+                "upgradeOverlay": upgrade_overlay,
+                "toppingUpsellHint": topping_upsell_hint,
+                "toppingUpsellSuggestion": (
+                    {
+                        "type": "add" if remaining_free > 0 else "swap_or_add",
+                        "topping": self._format_topping_card(suggested_top)
+                        if suggested_top
+                        else None,
+                        "extraPriceAED": (
+                            0.0
+                            if remaining_free > 0
+                            else _sanitize_output(suggested_top.get("priceAED"))
+                            if suggested_top
+                            else None
+                        ),
+                    }
+                    if suggested_top
+                    else None
+                ),
+            }
+        )
+
+    @function_tool(name="add_to_cart", description="Finalize product and add to cart.")
+    async def add_to_cart(
+        self,
+        product_id: str,
+        qty: int = 1,
+    ) -> Dict[str, Any]:
+        product = self._products.get(product_id)
+        if not product:
+            return {"error": "Unknown product"}
+
         qty = max(1, int(qty))
-        line = self._line(product)
 
-        base = Decimal(str(product.get("priceAED") or 0))
-        fs = line["flavor_summary"]
-        flavor_charge = Decimal(str(fs.get("charge", 0)))
+        line = self._get_or_create_line_state(product)
+        flavor_summary = line.get("flavor_summary", {}) or {}
+        topping_summary = line.get("topping_summary", {}) or {}
 
-        # Tag flavors
-        free_f = int(fs.get("free", int(product.get("scoops") or 0)))
-        tagged_flavors = []
-        for idx, f in enumerate(line["flavors"]):
-            is_extra = idx >= free_f
-            unit_price = float(self._extra_flavor_price) if is_extra else 0.0
-            tagged_flavors.append({
-                **self._flavor_card(f),
-                "isExtra": is_extra,
-                "unitPriceAED": unit_price,
-                "linePriceAED": unit_price * qty,
-            })
+        base_price = Decimal(str(product.get("priceAED") or 0.0))
+        flavor_charge = Decimal(str(flavor_summary.get("charge", 0)))
+        # Re-calculate topping logic to be precise about free/paid split
+        included_toppings_count = int(product.get("includedToppings") or 0)
+        current_toppings = line.get("toppings", [])
 
-        # Tag toppings
-        incl = int(product.get("includedToppings") or 0)
-        topping_charge = Decimal(0)
         tagged_toppings = []
-        for idx, t in enumerate(line["toppings"]):
-            is_free = idx < incl
-            unit = 0.0 if is_free else float(t.get("priceAED") or 0.0)
-            if not is_free:
-                topping_charge += Decimal(str(unit))
-            tagged_toppings.append({
-                **self._topping_card(t),
-                "isFree": is_free, "unitPriceAED": unit, "linePriceAED": unit * qty,
-            })
+        topping_extras_total = Decimal(0)
 
-        per_unit = base + flavor_charge + topping_charge
-        line_sub = (per_unit * Decimal(qty)).quantize(Decimal("0.01"))
-        line_tax = (line_sub * VAT_RATE).quantize(Decimal("0.01"))
-        line_total = line_sub + line_tax
+        for i, t in enumerate(current_toppings):
+            t_card = self._format_topping_card(t)
+            is_free = i < included_toppings_count
+
+            if is_free:
+                unit_price = 0.0
+            else:
+                unit_price = float(t.get("priceAED") or 0.0)
+
+            line_price = unit_price * qty
+            if not is_free:
+                topping_extras_total += Decimal(str(unit_price))
+
+            tagged_toppings.append(
+                {
+                    **t_card,
+                    "isFree": is_free,
+                    "unitPriceAED": unit_price,
+                    "linePriceAED": line_price,
+                }
+            )
+
+        # Use our recalculated topping charge instead of the summary one
+        # to ensure consistency with the line items
+        topping_charge = topping_extras_total
+
+        # 1. Calculate per-unit totals
+        per_unit_subtotal = base_price + flavor_charge + topping_charge
+
+        # 2. Calculate line totals (Subtotal + Tax)
+        # Tax is applied to the line subtotal (unit * qty)
+        line_subtotal = (per_unit_subtotal * Decimal(qty)).quantize(Decimal("0.01"))
+        line_tax = (line_subtotal * VAT_RATE).quantize(Decimal("0.01"))
+        line_total = line_subtotal + line_tax
+
+        # Tag flavors with price and extra/free flags based on summary
+        flavors_list = line.get("flavors", [])
+        free_count = int(
+            flavor_summary.get("free", int(product.get("scoops") or 0))
+        )
+        extra_price_per = self._extra_flavor_price
+
+        tagged_flavors = []
+        for i, f in enumerate(flavors_list):
+            f_card = self._format_flavor_card(f)
+            is_extra = i >= free_count
+            unit_price = float(extra_price_per) if is_extra else 0.0
+            tagged_flavors.append(
+                {
+                    **f_card,
+                    "isExtra": is_extra,
+                    "unitPriceAED": unit_price,
+                    "linePriceAED": unit_price * qty,
+                }
+            )
 
         cart_item = {
-            "product_id": product_id, "name": product["name"],
-            "category": product.get("category"), "size": product.get("size"),
-            "imageUrl": product.get("imageUrl") or self._kb["image_defaults"]["square"],
+            "product_id": product_id,
+            "name": product["name"],
+            "category": product.get("category"),
+            "size": product.get("size"),
+            "imageUrl": product.get("imageUrl")
+            or self._kb["image_defaults"]["square"],
             "qty": qty,
-            "basePriceAED": _clean(base), "flavorExtrasAED": _clean(flavor_charge),
-            "toppingExtrasAED": _clean(topping_charge), "unitSubTotalAED": _clean(per_unit),
-            "unitTaxAED": _clean(per_unit * VAT_RATE),
-            "lineSubTotalAED": _clean(line_sub), "lineTaxAED": _clean(line_tax),
-            "lineTotalAED": _clean(line_total),
-            "flavors": _clean(tagged_flavors), "toppings": _clean(tagged_toppings),
+            # price breakdown for UI
+            "basePriceAED": _sanitize_output(base_price),
+            "flavorExtrasAED": _sanitize_output(flavor_charge),
+            "toppingExtrasAED": _sanitize_output(topping_charge),
+            "unitSubTotalAED": _sanitize_output(per_unit_subtotal),
+            "unitTaxAED": _sanitize_output(per_unit_subtotal * VAT_RATE),
+            "lineSubTotalAED": _sanitize_output(line_subtotal),
+            "lineTaxAED": _sanitize_output(line_tax),
+            "lineTotalAED": _sanitize_output(line_total),
+            # line details
+            "flavors": tagged_flavors,
+            "toppings": tagged_toppings,
         }
+
         self._cart_items.append(cart_item)
 
-        # Recalculate cart totals
-        cart_sub = sum(Decimal(str(i["lineSubTotalAED"])) for i in self._cart_items)
-        cart_tax = sum(Decimal(str(i["lineTaxAED"])) for i in self._cart_items)
-        cart_total = cart_sub + cart_tax
+        # 4. Recalculate Cart Totals
+        cart_subtotal = Decimal(0)
+        cart_tax = Decimal(0)
+        cart_total = Decimal(0)
+
+        for item in self._cart_items:
+            cart_subtotal += Decimal(str(item.get("lineSubTotalAED", 0.0)))
+            cart_tax += Decimal(str(item.get("lineTaxAED", 0.0)))
+            cart_total += Decimal(str(item.get("lineTotalAED", 0.0)))
+
         self._cart_summary = {
-            "subTotalAED": _clean(cart_sub),
-            "taxAED": _clean(cart_tax),
-            "totalAED": _clean(cart_total),
+            "subTotalAED": _sanitize_output(cart_subtotal),
+            "taxAED": _sanitize_output(cart_tax),
+            "totalAED": _sanitize_output(cart_total),
         }
 
-        cart_payload = {"items": self._cart_items, **self._cart_summary}
-        await self._emit("cart", {"cart": cart_payload},
-                         rpc_method="client.cartUpdated", rpc_payload={"cart": cart_payload})
+        payload = {"items": self._cart_items, **self._cart_summary}
 
-        # Cart-level upsell
-        cat = product.get("category", "")
-        if cat in ("Cups", "Sundae Cups"):
-            upsell = "Would you also like a milkshake to go with your ice cream?"
-        elif cat == "Milk Shakes":
-            upsell = "Would you like to add a Sundae Cup to pair with your shake?"
-        else:
-            upsell = None
+        # 1. Publish Overlay
+        await self._publish_overlay_for_ctx("cart", {"cart": payload})
+
+        # 2. Emit Client RPC + capture UI response
+        ui_rpc = await self._rpc_with_context(
+            "client.cartUpdated",
+            {"cart": payload},
+        )
 
         agent_note = (
-            f"Added {qty} {product['name']} to your cart. "
-            f"Total so far: {float(cart_total):.2f} dirham including tax."
+            f"I have added {qty} {product['name']} to your cart. "
+            f"Your current total is {float(cart_total):.2f} dirham including tax."
         )
-        if upsell:
-            agent_note += f" {upsell}"
+        cart_upsell_hint = None
+        cart_upsell_suggestion = None
+        # Simple cart-level upsell: if this is a Cup/Sundae, suggest a Milkshake; if a Milkshake, suggest a Sundae.
+        if product.get("category") in ("Cups", "Sundae Cups"):
+            cart_upsell_hint = "Suggest a milkshake that matches their flavors as a cart add-on."
+            cart_upsell_suggestion = {"type": "add", "category": "Milk Shakes"}
+        elif product.get("category") == "Milk Shakes":
+            cart_upsell_hint = "Suggest a Sundae Cup that pairs with the shake as a cart add-on."
+            cart_upsell_suggestion = {"type": "add", "category": "Sundae Cups"}
+        if cart_upsell_hint:
+            agent_note = f"{agent_note} {cart_upsell_hint}"
 
-        return _clean({"cart": cart_payload, "agentNote": agent_note, "cartUpsellHint": upsell})
+        return _sanitize_output(
+            {
+                "cart": payload,
+                "uiRpc": ui_rpc,
+                "agentNote": agent_note,
+                "cartUpsellHint": cart_upsell_hint,
+                "cartUpsellSuggestion": cart_upsell_suggestion,
+            }
+        )
 
-    @function_tool(name="get_directions", description="Show pickup directions to the correct counter.")
+    @function_tool(name="get_directions", description="Show pickup directions.")
     async def get_directions(
         self,
         display_name: str,
@@ -903,60 +1698,90 @@ class ScoopTools:
     ) -> Dict[str, Any]:
         displays = self._kb.get("displays", {})
 
-        def build(name: str) -> Dict[str, Any]:
-            info = displays.get(name, {})
+        locations: List[Dict[str, Any]] = []
+
+        def build_location(name: str) -> Dict[str, Any]:
+            canonical = self._canonical_display(name)
+            info = displays.get(canonical or name, {})
             return {
-                "displayName": info.get("displayName", name),
+                "displayName": info.get("displayName", canonical or name),
                 "hint": info.get("hint", "Please proceed to this counter."),
                 "mapImage": info.get("mapImage"),
             }
 
-        locations = [build(display_name)] + [build(e) for e in (extra_displays or [])]
+        locations.append(build_location(display_name))
+
+        if extra_displays:
+            for extra in extra_displays:
+                locations.append(build_location(extra))
+
         payload = {"locations": locations}
 
-        await self._emit("directions", payload,
-                         rpc_method="client.directions",
-                         rpc_payload={"action": "show", "locations": locations})
-        return _clean(payload)
+        # Overlay
+        await self._publish_overlay_for_ctx("directions", payload)
 
-# ---------------------------------------------------------------------------
-# ScoopAgent
-# ---------------------------------------------------------------------------
+        # RPC for UI (DirectionsPayload expects action + locations) + store context
+        ui_rpc = await self._rpc_with_context(
+            "client.directions",
+            {"action": "show", "locations": locations},
+        )
+
+        return _sanitize_output(
+            {
+                **payload,
+                "uiRpc": ui_rpc,
+            }
+        )
+
 
 class ScoopAgent(Agent):
-    def __init__(self, state: SessionState, tools: ScoopTools, language: str = "english") -> None:
-        self._state = state
+    """Agent wrapper from Code 1, adapted for Google/Deepgram/Cartesia pipeline."""
+
+    def __init__(
+        self,
+        session_state: ScoopSessionState,
+        tools: ScoopTools,
+        language: str = "english",
+    ) -> None:
+        self._session_state = session_state
         self._tools = tools
         self._language = language
-        prompt, _ = _load_prompt(language)
-        instructions = (
-            prompt
-            .replace("{{CATALOG_CONTEXT}}", tools._catalog_context())
-            .replace("{{SESSION_CONTEXT}}", state.describe())
-        )
-        super().__init__(
-            instructions=instructions,
-            tools=[
-                tools.list_menu, tools.choose_flavors, tools.choose_toppings,
-                tools.add_to_cart, tools.get_directions,
-            ],
-        )
+        toolkit = [
+            self._tools.list_menu,
+            self._tools.choose_flavors,
+            self._tools.choose_toppings,
+            self._tools.add_to_cart,
+            self._tools.get_directions,
+        ]
+        super().__init__(instructions=self._build_instructions(), tools=toolkit)
 
-    async def on_enter(self) -> None:
-        logger.info("[AGENT] on_enter — sending greeting")
+    def _build_instructions(self) -> str:
+        context_summary = self._session_state.describe()
+        catalog_context = self._tools._get_catalog_context()
+        # Load prompt dynamically from personal.toml
+        prompt_text, _ = load_prompt_config(self._language)
+        instructions = prompt_text.replace("{{CATALOG_CONTEXT}}", catalog_context)
+        instructions = instructions.replace("{{SESSION_CONTEXT}}", context_summary)
+        return instructions
+
+    async def on_enter(self, participant: Any = None) -> None:
+        logger.info("[AGENT] on_enter called, sending initial greeting.")
         try:
-            tod = _greeting(arabic=self._language == "arabic")
             if self._language == "arabic":
+                tod = _time_of_day_greeting_arabic()
                 greeting = f"{tod}، يا هلا فيكم في باسكين روبنز، اسمي سارة. أتشرف، ويا منو أتكلم اليوم؟"
             else:
-                greeting = f"{tod}, welcome to Baskin Robbins! My name is Sarah. May I know your name?"
+                tod = _time_of_day_greeting()
+                greeting = f"{tod}, welcome to Baskin Robbins. My name is Sarah. May I know your name?"
             await self.session.say(greeting, allow_interruptions=True)
         except Exception:
-            logger.exception("[AGENT] Failed to deliver greeting")
+            logger.exception("Failed to deliver opening greeting")
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
+
+# =====================
+# Worker Entrypoint (Rewritten for Code 2 Pipeline)
+# =====================
+
 
 async def entrypoint(ctx: JobContext) -> None:
     config = CONFIG
@@ -966,101 +1791,167 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await ctx.connect()
 
-    # Detect language from room metadata
-    language = "english"
+    # --- Detect language from room metadata ---
+    language = "english"  # default
     try:
-        raw_meta = ctx.room.metadata or ""
-        if raw_meta:
-            language = json.loads(raw_meta).get("language", "english").lower().strip()
+        room_metadata_raw = ctx.room.metadata or ""
+        if room_metadata_raw:
+            room_meta = json.loads(room_metadata_raw)
+            language = room_meta.get("language", "english").lower().strip()
     except (json.JSONDecodeError, AttributeError):
-        logger.warning("[ENTRYPOINT] Could not parse room metadata, defaulting to english")
+        logger.warning("[ENTRYPOINT] Could not parse room metadata for language, defaulting to english")
 
-    _, voice_id = _load_prompt(language)
-    logger.info("[ENTRYPOINT] job=%s | identity=%s | lang=%s | voice=%s",
-                job_id, agent_identity, language, voice_id)
+    # Load voice_id from personal.toml based on language
+    _, voice_id = load_prompt_config(language)
 
-    # Pipeline components
-    stt = deepgram.STT(
-        model="nova-3",
-        language="ar" if language == "arabic" else "en",
-        api_key=config.deepgram_api_key,
+    logger.info(
+        "[ENTRYPOINT] Starting job_id=%s | agent_identity=%s | language=%s | voice=%s",
+        job_id,
+        agent_identity,
+        language,
+        voice_id,
     )
+
+    # Deepgram STT with language-aware config
+    stt_language = "ar" if language == "arabic" else "en"
+    stt = deepgram.STT(model="nova-3", language=stt_language, api_key=config.deepgram_api_key)
     vad = silero.VAD.load()
-    llm = lk_openai.LLM(model=config.openai_model, api_key=config.openai_api_key)
-    tts = cartesia.TTS(model="sonic-3", voice=voice_id, api_key=config.cartesia_api_key)
+    llm = lk_openai.LLM(
+        model=config.openai_model,
+        api_key=config.openai_api_key,
+    )
+    
+    # COMMENTED OUT: Google Gemini LLM
+    # llm = lk_google.LLM(
+    #     model=config.google_model,
+    #     api_key=config.google_api_key,
+    # )
+
+    # TTS with language-specific voice from personal.toml (Cartesia sonic-3)
+    tts = cartesia.TTS(
+        model="sonic-3",
+        voice=voice_id,
+        api_key=config.cartesia_api_key,
+    )
+
+    # Turn detection: LiveKit MultilingualModel (runs locally on CPU, ~500 MB RAM)
+    # Uses Deepgram STT transcripts for context-aware end-of-turn detection
     turn_detector = MultilingualModel()
 
     session = AgentSession(
-        stt=stt, vad=vad, llm=llm, tts=tts,
+        stt=stt,
+        vad=vad,
+        llm=llm,
+        tts=tts,
         turn_detection=turn_detector,
-        min_endpointing_delay=0.5,
-        max_endpointing_delay=3.0,
+        min_endpointing_delay=0.2,   # was 0.5 — time after speech stops before LLM fires
+        max_endpointing_delay=1.2,   # was 3.0 — cap on how long we wait for more speech
     )
 
+    # COMMENTED OUT: Anam Avatar Session (switched to Simli)
+    # avatar_session = anam_avatar.AvatarSession(
+    #     persona_config=anam_avatar.PersonaConfig(
+    #         name=config.agent_name,
+    #         avatarId=config.anam_avatar_id,
+    #     ),
+    #     api_key=config.anam_api_key,
+    #     avatar_participant_name=config.agent_name,
+    #     avatar_participant_identity=agent_identity,
+    # )
+
+    # Simli Avatar Session
     avatar_session = simli.AvatarSession(
-        simli_config=simli.SimliConfig(api_key=config.simli_api_key, face_id=config.simli_face_id),
+        simli_config=simli.SimliConfig(
+            api_key=config.simli_api_key,
+            face_id=config.simli_face_id,
+        ),
         avatar_participant_name=config.agent_name,
     )
 
-    state = SessionState()
-    tools = ScoopTools(config, session, ctx.room, state)
+    # State & Tools (Code 1 Style)
+    session_state = ScoopSessionState()
+    tools = ScoopTools(config, session, ctx.room, controller_identity, session_state)
 
-    # RPC handlers
-    async def _handle_add_to_cart(rpc_data) -> str:
+    # --- RPC Handlers ---
+    async def handle_add_to_cart_rpc(rpc_data) -> str:
         try:
-            payload = json.loads(rpc_data.payload or "{}")
-            pid = payload.get("productId") or payload.get("product_id")
-            if not pid:
+            payload_raw = rpc_data.payload or "{}"
+            payload = json.loads(payload_raw)
+            product_id = payload.get("productId") or payload.get("product_id")
+            qty = int(payload.get("qty", 1))
+            if not product_id:
                 return "missing productId"
-            await tools.add_to_cart(str(pid), int(payload.get("qty", 1)))
+
+            await tools.add_to_cart(str(product_id), qty)
             return "ok"
         except Exception as exc:
-            logger.exception("[RPC] agent.addToCart error")
+            logger.exception("agent.addToCart RPC error: %s", exc)
             return f"error: {exc}"
 
-    ctx.room.local_participant.register_rpc_method("agent.addToCart", _handle_add_to_cart)
-    ctx.room.local_participant.register_rpc_method("agent.overlayAck", lambda _: "ok")
-
-    # Start avatar and wait for guest in parallel
-    await asyncio.gather(
-        ctx.wait_for_participant(),
-        avatar_session.start(session, room=ctx.room),
+    ctx.room.local_participant.register_rpc_method(
+        "agent.addToCart", handle_add_to_cart_rpc
     )
 
-    logger.info("[ENTRYPOINT] Guest connected, avatar ready. Starting agent session.")
-    agent = ScoopAgent(state, tools, language=language)
+    async def handle_overlay_ack_rpc(rpc_data) -> str:
+        # Minimal Ack logic for overlays
+        return "ok"
+
+    ctx.room.local_participant.register_rpc_method(
+        "agent.overlayAck", handle_overlay_ack_rpc
+    )
+
+    # --- Start ---
+    wait_for_guest = asyncio.create_task(ctx.wait_for_participant())
+    avatar_ready = asyncio.create_task(avatar_session.start(session, room=ctx.room))
+    await asyncio.gather(wait_for_guest, avatar_ready)
+
+    logger.info(
+        "[ENTRYPOINT] Guest connected and avatar ready, starting agent session. Language: %s",
+        language,
+    )
+
+    agent = ScoopAgent(session_state, tools, language=language)
 
     await session.start(
         agent=agent,
         room=ctx.room,
-        room_input_options=RoomInputOptions(audio_enabled=True, video_enabled=False),
+        room_input_options=RoomInputOptions(
+            audio_enabled=True,
+            video_enabled=False,
+        ),
     )
 
-# ---------------------------------------------------------------------------
-# Request handler
-# ---------------------------------------------------------------------------
 
+# ===============
+# Request Handler
+# ===============
 async def request_fnc(req: JobRequest) -> None:
     config = CONFIG
     agent_identity = config.agent_identity(req.id)
     controller_identity = config.controller_identity(req.id)
     metadata = config.agent_metadata(agent_identity)
-    logger.info("[REQUEST] job=%s | agent=%s | ctrl=%s", req.id, agent_identity, controller_identity)
+    attributes = {**metadata, "agentControllerIdentity": controller_identity}
+    logger.info(
+        "[REQUEST] Accepting job | job_id=%s | agent_identity=%s | controller_identity=%s",
+        req.id,
+        agent_identity,
+        controller_identity,
+    )
     await req.accept(
         name=config.agent_name,
         identity=controller_identity,
         metadata=json.dumps(metadata),
-        attributes={**metadata, "agentControllerIdentity": controller_identity},
+        attributes=attributes,
     )
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(
-        entrypoint_fnc=entrypoint,
-        worker_type=WorkerType.ROOM,
-        request_fnc=request_fnc,
-        agent_name=CONFIG.agent_name,
-    ))
+    config = CONFIG
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            worker_type=WorkerType.ROOM,
+            request_fnc=request_fnc,
+            agent_name=config.agent_name,
+        )
+    )
