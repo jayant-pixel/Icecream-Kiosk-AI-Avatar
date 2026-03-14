@@ -628,6 +628,20 @@ class ScoopTools:
 
         return rpc_parsed
 
+    @function_tool(
+        name="end_call",
+        description="Finish the kiosk session. Call this only after you have already spoken the final professional closing line.",
+    )
+    async def end_call(self) -> Dict[str, Any]:
+        await self._publish_overlay_for_ctx("clear", {})
+        ui_rpc = await self._rpc_with_context("client.endCall", {"action": "end"})
+        return _sanitize_output(
+            {
+                "status": "ending_call",
+                "uiRpc": ui_rpc,
+            }
+        )
+
     def _get_catalog_context(self) -> str:
         lines = ["# Product Cheat Sheet"]
         for pid in self._product_order:
@@ -679,10 +693,21 @@ class ScoopTools:
             return bool(product.get("allowFlavorSelection"))
         return bool(product.get("scoops"))
 
+    def _product_allows_toppings(self, product: Optional[Dict[str, Any]]) -> bool:
+        if not product:
+            return False
+        allow_toppings = product.get("allowToppings")
+        if allow_toppings is False:
+            return False
+        if allow_toppings == "liquid_only":
+            return True
+        category = product.get("category")
+        return category in ("Cups", "Sundae Cups")
+
     def _format_product_card(self, p: Dict[str, Any]) -> Dict[str, Any]:
         price = p.get("priceAED")
         display_name = self._canonical_display(p.get("display"))
-        card: Dict[str, Any] = {
+        return {
             "id": p.get("id"),
             "name": p.get("name"),
             "category": p.get("category") or CATEGORY_FALLBACK,
@@ -693,13 +718,8 @@ class ScoopTools:
             "display": display_name,
             "includedToppings": p.get("includedToppings"),
             "allowsFlavorSelection": self._product_allows_flavors(p),
+            "allowsToppings": self._product_allows_toppings(p),
         }
-        # Cake-specific fields
-        if p.get("category") == "Cakes":
-            card["serves"] = p.get("serves")
-            card["cakeBaseFlavor"] = p.get("cakeBaseFlavor")
-            card["allowCakeMessage"] = p.get("allowCakeMessage", False)
-        return card
 
     def _format_flavor_card(self, f: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -720,6 +740,59 @@ class ScoopTools:
             "imageUrl": t.get("imageUrl") or self._kb["image_defaults"]["square"],
             "dietary": t.get("dietary", []),
         }
+
+    def _topping_note_for_product(self, product: Optional[Dict[str, Any]]) -> str:
+        if not product:
+            return "We have liquid and dry toppings."
+        category = product.get("category")
+        if category == "Cups":
+            return "We have liquid and dry toppings. You can choose up to two, and the price depends on the topping you pick."
+        if category == "Sundae Cups":
+            return "We have liquid and dry toppings. Choose your included free toppings from those sections."
+        if product.get("allowToppings") == "liquid_only":
+            return "We have liquid and dry toppings, and this shake allows one liquid topping only."
+        return "We have liquid and dry toppings."
+
+    def _validate_toppings(
+        self, product: Dict[str, Any], toppings: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        category = product.get("category")
+        allow_toppings = product.get("allowToppings")
+        included_toppings = int(product.get("includedToppings") or 0)
+        max_toppings = int(product.get("maxToppings") or 0)
+        max_liquid_toppings = int(product.get("maxLiquidToppings") or 0)
+
+        if category == "Sundae Cups":
+            if len(toppings) > included_toppings:
+                return (
+                    toppings[:included_toppings],
+                    f"Sundae Cups only include {included_toppings} free topping(s). No extra toppings are allowed.",
+                )
+            return toppings, None
+
+        if category == "Cups":
+            if len(toppings) > max_toppings:
+                return (
+                    toppings[:max_toppings],
+                    f"Cups can have up to {max_toppings} paid topping(s).",
+                )
+            return toppings, None
+
+        if allow_toppings == "liquid_only":
+            liquid_toppings = [t for t in toppings if t.get("type") == "liquid"]
+            if len(liquid_toppings) != len(toppings):
+                return (
+                    liquid_toppings[:max_liquid_toppings],
+                    "Make Your Own Shake allows liquid toppings only.",
+                )
+            if len(liquid_toppings) > max_liquid_toppings:
+                return (
+                    liquid_toppings[:max_liquid_toppings],
+                    f"Make Your Own Shake allows only {max_liquid_toppings} liquid topping.",
+                )
+            return liquid_toppings, None
+
+        return [], "Toppings are not available for this product."
 
     def _resolve_product(
         self, product_id: Optional[str], query: Optional[str]
@@ -1065,7 +1138,7 @@ class ScoopTools:
                     "products": [
                         {"id": p["id"], "name": p["name"], "priceAED": p["priceAED"],
                          "scoops": p.get("scoops"), "size": p.get("size"),
-                         "category": p.get("category"), "serves": p.get("serves")}
+                         "category": p.get("category")}
                         for p in payload.get("products", [])
                     ],
                 }
@@ -1166,7 +1239,21 @@ class ScoopTools:
                 }
 
             else:  # toppings
-                cards = [self._format_topping_card(t) for t in self._toppings.values()]
+                allowed_toppings = list(self._toppings.values())
+                if target_product and not self._product_allows_toppings(target_product):
+                    return _sanitize_output(
+                        {
+                            "error": "topping_selection_not_available",
+                            "productId": target_product_id,
+                            "productName": target_product.get("name"),
+                            "agentNote": "Toppings are not available for this product.",
+                        }
+                    )
+                if target_product and target_product.get("allowToppings") == "liquid_only":
+                    allowed_toppings = [
+                        t for t in allowed_toppings if t.get("type") == "liquid"
+                    ]
+                cards = [self._format_topping_card(t) for t in allowed_toppings]
                 free_slots = (
                     int(target_product.get("includedToppings") or 0)
                     if target_product
@@ -1201,7 +1288,7 @@ class ScoopTools:
                     if target_product
                     else None,
                     "category": target_product.get("category") if target_product else None,
-                    "note": "Extra toppings cost 5 or 6 dirham each.",
+                    "note": self._topping_note_for_product(target_product),
                     "freeToppings": free_slots,
                     "freeToppingsRemaining": free_remaining,
                     "selectedToppingIds": selected_ids,
@@ -1247,7 +1334,7 @@ class ScoopTools:
                     "selectedToppings": [t["name"] for t in (line.get("toppings", []) if line else [])],
                     "availableToppings": [
                         {"name": t["name"], "type": t.get("type", "dry"), "priceAED": t.get("priceAED")}
-                        for t in self._toppings.values()
+                        for t in allowed_toppings
                         if t.get("available", True)
                     ],
                 }
@@ -1290,11 +1377,17 @@ class ScoopTools:
             if f:
                 resolved_flavors.append(f)
 
+        free_slots = int(product.get("maxFlavors") or product.get("scoops") or 0)
+        truncated = False
+        if len(resolved_flavors) > free_slots:
+            resolved_flavors = resolved_flavors[:free_slots]
+            truncated = True
+
         # Even if empty, we respect it and clear previous selections
         line["flavors"] = resolved_flavors
 
         flavor_summary = line.get("flavor_summary", {}) or {}
-        free_slots = int(flavor_summary.get("free", int(product.get("scoops") or 0)))
+        free_slots = int(flavor_summary.get("free", free_slots))
         used = len(resolved_flavors)
         extra_count = max(0, used - free_slots)
 
@@ -1342,6 +1435,10 @@ class ScoopTools:
             f"You have {remaining_free} free flavor(s) remaining. "
             f"Extra flavor charge is {float(extra_charge):.2f} dirham."
         )
+        if truncated:
+            agent_note = (
+                f"{agent_note} This item only allows {free_slots} flavor(s), so I kept the first {free_slots}."
+            )
         upsell_hint = None
         flavor_upsell_suggestion = None
         suggested_flavor = self._suggest_flavor({f.get("id") for f in resolved_flavors})
@@ -1356,13 +1453,12 @@ class ScoopTools:
             }
         elif remaining_free == 0 and suggested_flavor:
             upsell_hint = (
-                f"Flavors are full; propose swapping one for {suggested_flavor.get('name')} or adding it for "
-                f"{float(extra_price_per):.2f} dirham."
+                f"Flavors are full; propose swapping one for {suggested_flavor.get('name')} at no extra cost."
             )
             flavor_upsell_suggestion = {
-                "type": "swap_or_add",
+                "type": "swap",
                 "flavor": self._format_flavor_card(suggested_flavor),
-                "extraPriceAED": _sanitize_output(extra_price_per),
+                "extraPriceAED": 0.0,
             }
         if upsell_hint:
             agent_note = f"{agent_note} {upsell_hint}"
@@ -1397,6 +1493,10 @@ class ScoopTools:
             t = self._resolve_topping(tid)
             if t:
                 resolved_toppings.append(t)
+
+        resolved_toppings, validation_note = self._validate_toppings(
+            product, resolved_toppings
+        )
 
         line["toppings"] = resolved_toppings
 
@@ -1453,6 +1553,8 @@ class ScoopTools:
             f"You have {remaining_free} free topping(s) remaining. "
             f"Extra topping charge is {float(extra_charge):.2f} dirham."
         )
+        if validation_note:
+            agent_note = f"{agent_note} {validation_note}"
         upgrade_hint = None
         upgrade_overlay: Optional[Dict[str, Any]] = None
         # Deterministic Sundae upsell when a Cup has paid toppings beyond included slots.
@@ -1495,9 +1597,18 @@ class ScoopTools:
             topping_upsell_hint = (
                 f"{suggested_top.get('name')} would pair nicely with these flavors. Want me to add it for free?"
             )
-        elif remaining_free == 0 and suggested_top:
+        elif remaining_free == 0 and suggested_top and product.get("category") == "Sundae Cups":
             topping_upsell_hint = (
                 f"{suggested_top.get('name')} would taste great here. I can replace one of the current toppings with it. Should I go ahead?"
+            )
+        elif (
+            remaining_free == 0
+            and suggested_top
+            and product.get("category") == "Cups"
+            and len(resolved_toppings) < int(product.get("maxToppings") or 0)
+        ):
+            topping_upsell_hint = (
+                f"{suggested_top.get('name')} would pair nicely here for {float(suggested_top.get('priceAED') or 0.0):.2f} dirham. Want me to add it?"
             )
         if topping_upsell_hint:
             agent_note = f"{agent_note} {topping_upsell_hint}"
@@ -1514,13 +1625,19 @@ class ScoopTools:
                 "toppingUpsellHint": topping_upsell_hint,
                 "toppingUpsellSuggestion": (
                     {
-                        "type": "add" if remaining_free > 0 else "swap_or_add",
+                        "type": (
+                            "add"
+                            if remaining_free > 0
+                            else "swap"
+                            if product.get("category") == "Sundae Cups"
+                            else "add"
+                        ),
                         "topping": self._format_topping_card(suggested_top)
                         if suggested_top
                         else None,
                         "extraPriceAED": (
                             0.0
-                            if remaining_free > 0
+                            if remaining_free > 0 or product.get("category") == "Sundae Cups"
                             else _sanitize_output(suggested_top.get("priceAED"))
                             if suggested_top
                             else None
@@ -1672,10 +1789,16 @@ class ScoopTools:
         cart_upsell_suggestion = None
         # Simple cart-level upsell: if this is a Cup/Sundae, suggest a Milkshake; if a Milkshake, suggest a Sundae.
         if product.get("category") in ("Cups", "Sundae Cups"):
-            cart_upsell_hint = "Suggest a milkshake that matches their flavors as a cart add-on."
+            cart_upsell_hint = (
+                "Suggest a matching milkshake verbally only. Do not open the menu or change the UI "
+                "unless the guest explicitly accepts the suggestion."
+            )
             cart_upsell_suggestion = {"type": "add", "category": "Milk Shakes"}
         elif product.get("category") == "Milk Shakes":
-            cart_upsell_hint = "Suggest a Sundae Cup that pairs with the shake as a cart add-on."
+            cart_upsell_hint = (
+                "Suggest a matching Sundae Cup verbally only. Do not open the menu or change the UI "
+                "unless the guest explicitly accepts the suggestion."
+            )
             cart_upsell_suggestion = {"type": "add", "category": "Sundae Cups"}
         if cart_upsell_hint:
             agent_note = f"{agent_note} {cart_upsell_hint}"
@@ -1751,7 +1874,7 @@ class ScoopAgent(Agent):
             self._tools.choose_flavors,
             self._tools.choose_toppings,
             self._tools.add_to_cart,
-            self._tools.get_directions,
+            self._tools.end_call,
         ]
         super().__init__(instructions=self._build_instructions(), tools=toolkit)
 
