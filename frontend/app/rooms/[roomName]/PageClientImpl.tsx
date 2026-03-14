@@ -43,6 +43,7 @@ export function PageClientImpl(props: {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const identityRef = React.useRef<string | null>(null);
+  const dispatchRequestedRef = React.useRef(false);
   const selectedLanguage = props.language || "english";
 
   React.useEffect(() => {
@@ -78,17 +79,6 @@ export function PageClientImpl(props: {
           videoDeviceId: "",
         });
 
-        // Ensure Scoop avatar is dispatched (idempotent) with language.
-        fetch("/api/livekit/request-agent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            room: props.roomName,
-            language: selectedLanguage,
-          }),
-        }).catch((err) => {
-          console.warn("Failed to ensure agent dispatch", err);
-        });
       } catch (err) {
         if (cancelled) return;
         const message =
@@ -122,6 +112,29 @@ export function PageClientImpl(props: {
     }
     router.push("/");
   }, [props.roomName, router]);
+
+  const handleConnected = React.useCallback(async () => {
+    if (dispatchRequestedRef.current) {
+      return;
+    }
+    dispatchRequestedRef.current = true;
+    try {
+      const response = await fetch("/api/livekit/request-agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room: props.roomName,
+          language: selectedLanguage,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to request Scoop avatar");
+      }
+    } catch (err) {
+      console.warn("Failed to dispatch agent after room connect", err);
+      dispatchRequestedRef.current = false;
+    }
+  }, [props.roomName, selectedLanguage]);
 
   const roomOptions = React.useMemo<RoomOptions>(() => {
     return {
@@ -179,6 +192,7 @@ export function PageClientImpl(props: {
           connectOptions={connectOptions}
           video={false}
           audio={userChoices.audioEnabled}
+          onConnected={handleConnected}
           onDisconnected={handleOnLeave}
           data-lk-theme="default"
         >
