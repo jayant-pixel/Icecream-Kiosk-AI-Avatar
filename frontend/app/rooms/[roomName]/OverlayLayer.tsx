@@ -11,17 +11,15 @@ import clsx from "clsx";
 type ProductCard = {
   id?: string;
   name?: string;
-  category?: "Cups" | "Sundae Cups" | "Milk Shakes" | "Cakes" | string | null;
+  category?: "Cups" | "Sundae Cups" | "Milk Shakes" | string | null;
   size?: string | null;
-  serves?: string | null;
   scoops?: number | null;
   priceAED?: number | null;
   imageUrl?: string | null;
   display?: string | null;
   includedToppings?: number | null;
   allowsFlavorSelection?: boolean;
-  cakeBaseFlavor?: string | null;
-  allowCakeMessage?: boolean;
+  allowsToppings?: boolean;
 };
 
 type ProductGridPayload = {
@@ -234,7 +232,7 @@ type CartIndicator = { count: number; total: number };
 
 const decoder = new TextDecoder();
 const OVERLAY_TOPIC = "ui.overlay";
-const CATEGORY_OPTIONS = ["All", "Cups", "Sundae Cups", "Milk Shakes", "Cakes"];
+const CATEGORY_OPTIONS = ["All", "Cups", "Sundae Cups", "Milk Shakes"];
 const FLAVOR_TABS = ["All", "Choco", "Berry", "Classics", "SugarLess"];
 
 function parseRpcPayload<T>(data?: RpcInvocationData): T | null {
@@ -286,7 +284,6 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
   const [activeLayer, setActiveLayer] = useState<OverlayLayerKind>("products");
   const [panelLayer, setPanelLayer] = useState<"flavors" | "toppings" | null>(null);
   const [cartIndicator, setCartIndicator] = useState<CartIndicator>({ count: 0, total: 0 });
-  const [menuCache, setMenuCache] = useState<ProductGridPayload | null>(null);
 
   const sendOverlayAck = useCallback(
     async ({
@@ -363,7 +360,6 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
           setActiveLayer("products");
           setPanelLayer(null);
           if (productsPayload.view === "grid") {
-            setMenuCache(productsPayload as ProductGridPayload);
             setFlavorPayload(null);
             setToppingPayload(null);
             setUpgradePayload(null);
@@ -508,15 +504,37 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
       }
     };
 
+    const handleEndCall = async (): Promise<string> => {
+      try {
+        setProductPayload(null);
+        setFlavorPayload(null);
+        setToppingPayload(null);
+        setCartPayload(null);
+        setDirectionsPayload(null);
+        setUpgradePayload(null);
+        setActiveLayer("products");
+        setPanelLayer(null);
+        window.setTimeout(() => {
+          void room.disconnect();
+        }, 7000);
+        return "ok";
+      } catch (error) {
+        console.error("Error handling endCall RPC", error);
+        return "error";
+      }
+    };
+
     room.registerRpcMethod("client.menuLoaded", handleMenuLoaded);
     room.registerRpcMethod("client.flavorsLoaded", handleFlavorsLoaded);
     room.registerRpcMethod("client.toppingsLoaded", handleToppingsLoaded);
     room.registerRpcMethod("client.cartUpdated", handleCartUpdated);
+    room.registerRpcMethod("client.endCall", handleEndCall);
     return () => {
       room.unregisterRpcMethod("client.menuLoaded");
       room.unregisterRpcMethod("client.flavorsLoaded");
       room.unregisterRpcMethod("client.toppingsLoaded");
       room.unregisterRpcMethod("client.cartUpdated");
+      room.unregisterRpcMethod("client.endCall");
     };
   }, [room]);
 
@@ -562,8 +580,6 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
       <ProductGridOverlay payload={productPayload as ProductGridPayload} cartIndicator={cartIndicator} />
     ) : null;
 
-  const showMenuColumn = Boolean(detailElement && menuCache && !panelLayer);
-
   const renderCard = useCallback((content: ReactNode, widthClass: string, heightClass = "max-h-[calc(100vh-5rem)]") => {
     if (!content) {
       return null;
@@ -571,12 +587,12 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
     return (
       <div
         className={clsx(
-          "w-full shrink-0 overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl flex flex-col",
+          "w-full shrink-0 self-start overflow-hidden rounded-[32px] border border-black/5 bg-white/95 p-4 shadow-2xl flex flex-col",
           heightClass,
           widthClass
         )}
       >
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-[color:var(--icecream-primary)]/20 scrollbar-track-transparent">
+        <div className="overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-[color:var(--icecream-primary)]/20 scrollbar-track-transparent">
           {content}
         </div>
       </div>
@@ -589,13 +605,13 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
 
   if (activeLayer === "cart" && cartContent) {
     overlayBody = (
-      <div className={clsx(containerClass, "flex justify-start")}>
+      <div className={clsx(containerClass, "flex items-start justify-start")}>
         {renderCard(<CartOverlay payload={cartContent} />, "max-w-[420px]")}
       </div>
     );
   } else if (activeLayer === "directions" && directionsPayload) {
     overlayBody = (
-      <div className={clsx(containerClass, "flex justify-start")}>
+      <div className={clsx(containerClass, "flex items-start justify-start")}>
         {renderCard(<DirectionsOverlay payload={directionsPayload} />, "max-w-[420px]")}
       </div>
     );
@@ -606,28 +622,21 @@ export function OverlayLayer({ rpcDirections }: OverlayLayerProps = {}) {
         {renderCard(detailElement, "max-w-[520px]", "max-h-[calc(100vh-6rem)]")}
       </div>
     );
-  } else if (showMenuColumn && detailElement && menuCache) {
-    overlayBody = (
-      <div className={clsx(containerClass, "flex items-start justify-between gap-6")}>
-        {renderCard(detailElement, "max-w-[520px]", "max-h-[calc(100vh-6rem)]")}
-        {renderCard(<ProductGridOverlay payload={menuCache} cartIndicator={cartIndicator} compact />, "max-w-[520px]")}
-      </div>
-    );
   } else if (detailElement) {
     overlayBody = (
-      <div className={clsx(containerClass, "flex justify-end")}>
+      <div className={clsx(containerClass, "flex items-start justify-end")}>
         {renderCard(detailElement, "max-w-[520px]", "max-h-[calc(100vh-6rem)]")}
       </div>
     );
   } else if (gridElement) {
     overlayBody = (
-      <div className={clsx(containerClass, "flex justify-end")}>
+      <div className={clsx(containerClass, "flex items-start justify-end")}>
         {renderCard(gridElement, "max-w-[520px]")}
       </div>
     );
   } else if (panelContent) {
     overlayBody = (
-      <div className={clsx(containerClass, "flex justify-start")}>
+      <div className={clsx(containerClass, "flex items-start justify-start")}>
         {renderCard(panelContent, "max-w-[360px]")}
       </div>
     );
@@ -747,17 +756,10 @@ function ProductDetailOverlay({
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--icecream-primary)]">{product?.category}</p>
               <h2 className="text-xl font-semibold text-black">{product?.name ?? "Treat"}</h2>
-              {product?.category === "Cakes" ? (
-                <>
-                  <p className="text-xs text-black/60">Serves: {product?.serves ?? "-"}</p>
-                  {product?.cakeBaseFlavor ? <p className="text-xs text-black/60">Base: {product.cakeBaseFlavor} cake</p> : null}
-                </>
-              ) : (
-                <p className="text-xs text-black/60">
-                  Size: {product?.size ?? "-"}
-                  {typeof product?.scoops === "number" ? ` · ${product?.scoops} scoop${product?.scoops === 1 ? "" : "s"}` : null}
-                </p>
-              )}
+              <p className="text-xs text-black/60">
+                Size: {product?.size ?? "-"}
+                {typeof product?.scoops === "number" ? ` · ${product?.scoops} scoop${product?.scoops === 1 ? "" : "s"}` : null}
+              </p>
               {product.display ? <p className="text-[10px] text-black/60">Pickup: {product.display}</p> : null}
             </div>
             <div className="flex items-baseline gap-2">
@@ -765,29 +767,21 @@ function ProductDetailOverlay({
               <span className="text-xs text-black/40">base price</span>
             </div>
 
-            {/* Flavors / Toppings info row — hidden for cakes that have neither */}
-            {product?.category !== "Cakes" ? (
-              <div className="rounded-xl bg-black/5 px-3 py-2 text-xs text-black/70">
-                <div className="flex justify-between">
-                  <span>Included Flavors</span>
-                  <span className="font-medium">{product?.scoops ?? 0}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Included Toppings</span>
-                  <span className="font-medium">{product?.includedToppings ?? 0}</span>
-                </div>
+            <div className="rounded-xl bg-black/5 px-3 py-2 text-xs text-black/70">
+              <div className="flex justify-between">
+                <span>Included Flavors</span>
+                <span className="font-medium">{product?.scoops ?? 0}</span>
               </div>
-            ) : product?.allowsFlavorSelection ? (
-              /* Incredible Garden: show the 1-free-flavor badge */
-              <div className="rounded-xl bg-[color:var(--icecream-primary)]/8 border border-[color:var(--icecream-primary)]/20 px-3 py-2 text-xs text-[color:var(--icecream-primary)] font-medium">
-                1 free flavor included — choose any flavor you like
+              <div className="flex justify-between">
+                <span>Included Toppings</span>
+                <span className="font-medium">{product?.includedToppings ?? 0}</span>
               </div>
-            ) : null}
+            </div>
 
             {/* Action pills */}
             <div className="flex flex-wrap gap-2 text-[10px]">
-              {product?.allowsFlavorSelection ? <ActionPill label={product?.category === "Cakes" ? "Choose Flavor" : "Choose Flavors"} /> : null}
-              {product?.category !== "Cakes" ? <ActionPill label="Add Toppings" /> : null}
+              {product?.allowsFlavorSelection ? <ActionPill label="Choose Flavors" /> : null}
+              {product?.allowsToppings ? <ActionPill label="Add Toppings" /> : null}
             </div>
 
             <div className="flex items-center gap-2 pt-1">
@@ -806,14 +800,14 @@ function ProductDetailOverlay({
         <div className="mt-4 space-y-2 border-t border-black/5 pt-2">
           {product?.allowsFlavorSelection ? (
             <SelectionSummary
-              title={product?.category === "Cakes" ? "Selected Flavor" : "Selected Flavors"}
+              title="Selected Flavors"
               summary={payload.flavorSummary}
               items={payload.selectedFlavors}
-              emptyLabel={product?.category === "Cakes" ? "No flavor selected yet." : "No flavors selected."}
+              emptyLabel="No flavors selected."
               actionLabel="Change"
             />
           ) : null}
-          {product?.category !== "Cakes" ? (
+          {product?.allowsToppings ? (
             <SelectionSummary
               title="Selected Toppings"
               summary={payload.toppingSummary}
@@ -920,7 +914,7 @@ function ToppingsOverlay({ payload }: { payload: ToppingOverlayPayload }) {
           Free toppings remaining: {payload.freeToppingsRemaining ?? 0}
           {payload.category ? ` (${payload.category})` : ""}
         </p>
-        <p className="text-[11px] text-black/50">Extra toppings cost 5 or 6 dirham each.</p>
+        <p className="text-[11px] text-black/50">Liquid and dry toppings are priced individually.</p>
       </div>
       <div className="max-h-[50vh] space-y-4 overflow-y-auto pr-3">
         {liquidToppings.length > 0 && (
@@ -953,7 +947,7 @@ function CartOverlay({ payload }: { payload: NonNullable<CartOverlayPayload["car
   const items = payload.items ?? [];
   return (
     <div className="space-y-4 text-[color:var(--icecream-dark)]">
-      <OverlaySectionHeader title="Your Cart" subtitle="Everything ready for pickup" showBack />
+      <OverlaySectionHeader title="Your Cart" subtitle="Everything ready" showBack />
       {items.length === 0 ? (
         <div className="rounded-3xl bg-white/90 p-6 text-center text-sm text-black/60">Cart is empty for now.</div>
       ) : (
