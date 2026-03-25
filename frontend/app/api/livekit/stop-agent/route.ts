@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   AgentDispatchClient,
-  // RoomServiceClient
+  RoomServiceClient,
 } from "livekit-server-sdk";
 
 export async function DELETE(request: NextRequest) {
@@ -39,26 +39,34 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // const roomServiceClient = new RoomServiceClient(
-    //   LIVEKIT_URL,
-    //   LIVEKIT_API_KEY,
-    //   LIVEKIT_API_SECRET
-    // );
-    // const listParticipants = await roomServiceClient.listParticipants(roomName);
-    // console.log("listParticipants:", listParticipants);
-    // const participant = listParticipants.find(
-    //   (participant) =>
-    //     participant.kind === 4 &&
-    //     participant.attributes?.agentName === agentName
-    // );
-    // if (participant) {
-    //   await roomServiceClient.removeParticipant(roomName, participant.identity);
-    // } else {
-    //   return NextResponse.json(
-    //     { error: "Agent participant not found in the room" },
-    //     { status: 404 }
-    //   );
-    // }
+    const roomServiceClient = new RoomServiceClient(
+      LIVEKIT_URL,
+      LIVEKIT_API_KEY,
+      LIVEKIT_API_SECRET
+    );
+
+    // Check if other guests are still in the room before killing the dispatch
+    try {
+      const participants = await roomServiceClient.listParticipants(roomName);
+      const guestCount = participants.filter(
+        (p) =>
+          p.identity?.startsWith("guest-") ||
+          p.identity?.startsWith("guest_")
+      ).length;
+
+      if (guestCount > 1) {
+        console.log(
+          `Skipping dispatch deletion: ${guestCount} guests still in room ${roomName}`
+        );
+        return NextResponse.json({
+          status: "skipped",
+          message: "Other guests still in room, dispatch preserved",
+        });
+      }
+    } catch (err) {
+      // If room doesn't exist anymore, proceed with cleanup
+      console.warn("Could not list participants, proceeding with cleanup:", err);
+    }
 
     const agentDispatchClient = new AgentDispatchClient(
       LIVEKIT_URL,
