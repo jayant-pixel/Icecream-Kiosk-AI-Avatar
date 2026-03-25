@@ -3,6 +3,7 @@ import { ConnectionDetails } from "@/lib/types";
 import {
   AccessToken,
   AccessTokenOptions,
+  RoomServiceClient,
   VideoGrant,
 } from "livekit-server-sdk";
 import { NextRequest, NextResponse } from "next/server";
@@ -10,7 +11,6 @@ import { NextRequest, NextResponse } from "next/server";
 const API_KEY = process.env.LIVEKIT_API_KEY;
 const API_SECRET = process.env.LIVEKIT_API_SECRET;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
-const COOKIE_KEY = "random-participant-postfix";
 
 export async function GET(request: NextRequest) {
   try {
@@ -21,7 +21,6 @@ export async function GET(request: NextRequest) {
     const language = request.nextUrl.searchParams.get("language") ?? "english";
     const region = request.nextUrl.searchParams.get("region");
     const livekitServerUrl = region ? getLiveKitURL(region) : LIVEKIT_URL;
-    let randomParticipantPostfix = request.cookies.get(COOKIE_KEY)?.value;
     if (livekitServerUrl === undefined) {
       throw new Error("Invalid region");
     }
@@ -38,15 +37,35 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Pre-create the room with language metadata BEFORE the participant joins.
+    // This ensures the agent can reliably read ctx.room.metadata on connect,
+    // avoiding the race condition where metadata is set after the agent reads it.
+    if (API_KEY && API_SECRET && livekitServerUrl) {
+      const roomMetadata = JSON.stringify({ language });
+      const roomService = new RoomServiceClient(
+        livekitServerUrl,
+        API_KEY,
+        API_SECRET
+      );
+      try {
+        await roomService.createRoom({ name: roomName, metadata: roomMetadata });
+      } catch (err) {
+        // Room already exists — update its metadata instead
+        try {
+          await roomService.updateRoomMetadata(roomName, roomMetadata);
+        } catch {
+          // Best effort — request-agent will also set it as a fallback
+        }
+      }
+    }
+
     // Build participant metadata with language
     const participantMetadata = metadata
       ? JSON.stringify({ ...JSON.parse(metadata), language })
       : JSON.stringify({ language });
 
-    // Generate participant token
-    if (!randomParticipantPostfix) {
-      randomParticipantPostfix = randomString(4);
-    }
+    // Generate a fresh identity postfix per request (no cookie persistence)
+    const randomParticipantPostfix = randomString(4);
     const participantToken = await createParticipantToken(
       {
         identity: `${participantName}__${randomParticipantPostfix}`,
@@ -67,7 +86,6 @@ export async function GET(request: NextRequest) {
     return new NextResponse(JSON.stringify(data), {
       headers: {
         "Content-Type": "application/json",
-        "Set-Cookie": `${COOKIE_KEY}=${randomParticipantPostfix}; Path=/; HttpOnly; SameSite=Strict; Secure; Expires=${getCookieExpirationTime()}`,
       },
     });
   } catch (error) {
@@ -107,12 +125,4 @@ function getLiveKitURL(region: string | null): string {
     throw new Error(`${targetKey} is not defined`);
   }
   return url;
-}
-
-function getCookieExpirationTime(): string {
-  const now = new Date();
-  const time = now.getTime();
-  const expireTime = time + 60 * 120 * 1000;
-  now.setTime(expireTime);
-  return now.toUTCString();
 }
