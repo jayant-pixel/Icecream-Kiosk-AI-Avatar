@@ -26,6 +26,7 @@ from typing import (
     cast,
 )
 import re
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 # TOML support (Python 3.11+ has tomllib built-in)
@@ -48,9 +49,9 @@ from livekit.agents import (
     WorkerOptions,
     WorkerType,
     cli,
+    room_io,
 )
 from livekit.agents.llm import function_tool
-from livekit.agents.voice.room_io import RoomInputOptions
 
 # --- CHANGED: New Plugin Imports ---
 from livekit.plugins import openai as lk_openai, deepgram, cartesia, silero, simli
@@ -89,6 +90,8 @@ validate_environment()
 
 OVERLAY_TOPIC = "ui.overlay"
 CATEGORY_FALLBACK = "Highlights"
+ENGLISH_PROMPT_TIMEZONE = os.getenv("ENGLISH_PROMPT_TIMEZONE", "Asia/Kolkata")
+ARABIC_PROMPT_TIMEZONE = os.getenv("ARABIC_PROMPT_TIMEZONE", "Asia/Dubai")
 
 # Simple UAE VAT (5%) – applied on top of item + extras
 VAT_RATE = Decimal("0.05")
@@ -150,8 +153,12 @@ def _sanitize_output(data: Any) -> Any:
     return data
 
 
+def _current_hour_in_timezone(timezone_name: str) -> int:
+    return datetime.now(ZoneInfo(timezone_name)).hour
+
+
 def _time_of_day_greeting() -> str:
-    hour = datetime.now().hour
+    hour = _current_hour_in_timezone(ENGLISH_PROMPT_TIMEZONE)
     if 5 <= hour < 12:
         return "Good morning"
     if 12 <= hour < 17:
@@ -160,7 +167,7 @@ def _time_of_day_greeting() -> str:
 
 
 def _time_of_day_greeting_arabic() -> str:
-    hour = datetime.now().hour
+    hour = _current_hour_in_timezone(ARABIC_PROMPT_TIMEZONE)
     if 5 <= hour < 12:
         return "صباح الخير"
     if 12 <= hour < 17:
@@ -417,6 +424,14 @@ async def _emit_client_rpc(
             "[RPC] No guest participants found for method=%s, skipping RPC", method
         )
         return None
+
+    if len(destinations) > 1:
+        logger.warning(
+            "[RPC] Multiple guests in room (%d) — RPC will target first: %s. "
+            "This indicates a session isolation issue.",
+            len(destinations),
+            destinations[0],
+        )
 
     clean_payload = _sanitize_output(payload)
     payload_json = json.dumps(clean_payload)
@@ -1915,14 +1930,24 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
     # --- Detect language from room metadata ---
+    # Retry briefly: room metadata is pre-set by connection-details API,
+    # but there may be a tiny propagation delay after ctx.connect().
     language = "english"  # default
-    try:
-        room_metadata_raw = ctx.room.metadata or ""
-        if room_metadata_raw:
-            room_meta = json.loads(room_metadata_raw)
-            language = room_meta.get("language", "english").lower().strip()
-    except (json.JSONDecodeError, AttributeError):
-        logger.warning("[ENTRYPOINT] Could not parse room metadata for language, defaulting to english")
+    for _attempt in range(5):
+        try:
+            room_metadata_raw = ctx.room.metadata or ""
+            if room_metadata_raw:
+                room_meta = json.loads(room_metadata_raw)
+                language = room_meta.get("language", "english").lower().strip()
+                break
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        await asyncio.sleep(0.2)
+
+    if language == "english":
+        logger.info("[ENTRYPOINT] Language resolved to 'english' (default or explicit)")
+    else:
+        logger.info("[ENTRYPOINT] Language resolved to '%s' from room metadata", language)
 
     # Load voice_id from personal.toml based on language
     _, voice_id = load_prompt_config(language)
@@ -2038,9 +2063,9 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.start(
         agent=agent,
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            audio_enabled=True,
-            video_enabled=False,
+        room_options=room_io.RoomOptions(
+            audio_input=True,
+            video_input=False,
         ),
     )
 
