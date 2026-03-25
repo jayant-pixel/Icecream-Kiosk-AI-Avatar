@@ -1,4 +1,4 @@
-﻿"""
+"""
 Baskin Robbins Avatar Agent — Hybrid
 ------------------------------------
 Structure/Tools from Code 1 (Single Agent).
@@ -2049,9 +2049,27 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     # --- Start ---
-    wait_for_guest = asyncio.create_task(ctx.wait_for_participant())
-    avatar_ready = asyncio.create_task(avatar_session.start(session, room=ctx.room))
-    await asyncio.gather(wait_for_guest, avatar_ready)
+    async def start_avatar_with_retry():
+        for attempt in range(4):
+            try:
+                await avatar_session.start(session, room=ctx.room)
+                return
+            except Exception as e:
+                logger.warning("[SIMLI] Failed to start avatar (attempt %d/4): %s", attempt + 1, e)
+                if attempt == 3:
+                    raise
+                # Wait for Simli to finish cleaning up the previous session
+                await asyncio.sleep(3.5)
+
+    try:
+        wait_for_guest = asyncio.create_task(ctx.wait_for_participant())
+        avatar_ready = asyncio.create_task(start_avatar_with_retry())
+        await asyncio.gather(wait_for_guest, avatar_ready)
+    except Exception as exc:
+        logger.error("[ENTRYPOINT] Critical failure starting avatar session: %s", exc)
+        logger.error("This usually means Simli is down or at its concurrent session limit.")
+        await ctx.room.disconnect()
+        return
 
     logger.info(
         "[ENTRYPOINT] Guest connected and avatar ready, starting agent session. Language: %s",
