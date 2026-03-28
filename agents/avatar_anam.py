@@ -92,6 +92,13 @@ OVERLAY_TOPIC = "ui.overlay"
 CATEGORY_FALLBACK = "Highlights"
 ENGLISH_PROMPT_TIMEZONE = os.getenv("ENGLISH_PROMPT_TIMEZONE", "Asia/Kolkata")
 ARABIC_PROMPT_TIMEZONE = os.getenv("ARABIC_PROMPT_TIMEZONE", "Asia/Dubai")
+DEFAULT_SESSION_LIMIT_SECONDS = 15 * 60
+SESSION_LIMIT_SECONDS = max(
+    1, int(os.getenv("SESSION_LIMIT_SECONDS", str(DEFAULT_SESSION_LIMIT_SECONDS)))
+)
+SESSION_WARNING_SECONDS = max(
+    1, min(60, int(os.getenv("SESSION_WARNING_SECONDS", "60")))
+)
 
 # Simple UAE VAT (5%) – applied on top of item + extras
 VAT_RATE = Decimal("0.05")
@@ -119,6 +126,16 @@ def _tokenize(value: Optional[str]) -> set[str]:
         if token.endswith("s") and len(token) > 1:
             tokens.add(token[:-1])
     return tokens
+
+
+def _parse_room_metadata(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _tokens_for_label(value: Optional[str]) -> set[str]:
@@ -1933,16 +1950,25 @@ async def entrypoint(ctx: JobContext) -> None:
     # Retry briefly: room metadata is pre-set by connection-details API,
     # but there may be a tiny propagation delay after ctx.connect().
     language = "english"  # default
+    room_meta: Dict[str, Any] = {}
     for _attempt in range(5):
         try:
             room_metadata_raw = ctx.room.metadata or ""
             if room_metadata_raw:
-                room_meta = json.loads(room_metadata_raw)
+                room_meta = _parse_room_metadata(room_metadata_raw)
                 language = room_meta.get("language", "english").lower().strip()
                 break
-        except (json.JSONDecodeError, AttributeError):
+        except AttributeError:
             pass
         await asyncio.sleep(0.2)
+
+    session_limit_seconds = int(room_meta.get("sessionLimitSeconds") or SESSION_LIMIT_SECONDS)
+    session_deadline_at_ms = int(
+        room_meta.get("sessionDeadlineAt")
+        or ((datetime.now().timestamp() * 1000) + (session_limit_seconds * 1000))
+    )
+    warning_seconds = max(1, min(SESSION_WARNING_SECONDS, session_limit_seconds))
+    session_limit_minutes = max(1, session_limit_seconds // 60)
 
     if language == "english":
         logger.info("[ENTRYPOINT] Language resolved to 'english' (default or explicit)")
@@ -1953,11 +1979,12 @@ async def entrypoint(ctx: JobContext) -> None:
     _, voice_id = load_prompt_config(language)
 
     logger.info(
-        "[ENTRYPOINT] Starting job_id=%s | agent_identity=%s | language=%s | voice=%s",
+        "[ENTRYPOINT] Starting job_id=%s | agent_identity=%s | language=%s | voice=%s | deadline_ms=%s",
         job_id,
         agent_identity,
         language,
         voice_id,
+        session_deadline_at_ms,
     )
 
     # Deepgram STT with language-aware config
@@ -2086,6 +2113,47 @@ async def entrypoint(ctx: JobContext) -> None:
             video_input=False,
         ),
     )
+
+    async def session_timer() -> None:
+        warned = False
+        try:
+            while True:
+                remaining_seconds = max(
+                    0,
+                    int((session_deadline_at_ms - (datetime.now().timestamp() * 1000)) / 1000),
+                )
+
+                if remaining_seconds == 0:
+                    break
+
+                if not warned and remaining_seconds <= warning_seconds:
+                    warned = True
+                    warning_minutes = max(1, warning_seconds // 60)
+                    warning_unit = "minute" if warning_minutes == 1 else "minutes"
+                    await session.generate_reply(
+                        instructions=(
+                            f"Inform the user that the kiosk session will end in "
+                            f"{warning_minutes} {warning_unit} and they should complete "
+                            "their order or ask any final question now."
+                        )
+                    )
+
+                await asyncio.sleep(min(5, max(1, remaining_seconds)))
+
+            await session.generate_reply(
+                instructions=(
+                    f"Politely tell the user the {session_limit_minutes} minute kiosk "
+                    "session has ended, thank them, and say goodbye."
+                )
+            )
+            await tools.end_call()
+            await session.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("[SESSION] Timer shutdown flow failed: %s", exc)
+
+    asyncio.create_task(session_timer())
 
 
 # ===============
