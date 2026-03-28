@@ -25,4 +25,6 @@ export type ConnectionDetails = {
   roomName: string;
   participantName: string;
   participantToken: string;
+  sessionDeadlineAt?: number;
+  sessionLimitSeconds?: number;
 };

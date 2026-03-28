@@ -6,6 +6,12 @@ import {
 
 const AGENT_METADATA = { requestedBy: "meet-app" };
 
+type RoomMetadata = {
+  language?: string;
+  sessionDeadlineAt?: number;
+  sessionLimitSeconds?: number;
+};
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -50,8 +56,10 @@ export async function POST(request: NextRequest) {
       LIVEKIT_API_SECRET
     );
 
-    // Create room with language metadata so the agent can read it
-    const roomMetadata = JSON.stringify({ language: selectedLanguage });
+    // Preserve the existing room deadline so reconnects do not silently extend the session.
+    const roomMetadata = JSON.stringify(
+      await resolveRoomMetadata(roomServiceClient, roomName, selectedLanguage)
+    );
     await ensureRoomExists(roomServiceClient, roomName, roomMetadata);
 
     const dispatches = await agentDispatchClient.listDispatch(roomName);
@@ -81,6 +89,32 @@ export async function POST(request: NextRequest) {
       { error: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 }
     );
+  }
+}
+
+async function resolveRoomMetadata(
+  client: RoomServiceClient,
+  roomName: string,
+  language: string
+): Promise<RoomMetadata> {
+  const rooms = await client.listRooms([roomName]);
+  const existingRoom = rooms.find((room) => room.name === roomName);
+  const existingMetadata = parseRoomMetadata(existingRoom?.metadata);
+  return {
+    ...existingMetadata,
+    language,
+  };
+}
+
+function parseRoomMetadata(raw: string | undefined): RoomMetadata {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as RoomMetadata;
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
   }
 }
 

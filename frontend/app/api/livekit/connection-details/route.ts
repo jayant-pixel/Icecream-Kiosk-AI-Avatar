@@ -11,6 +11,13 @@ import { NextRequest, NextResponse } from "next/server";
 const API_KEY = process.env.LIVEKIT_API_KEY;
 const API_SECRET = process.env.LIVEKIT_API_SECRET;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
+const DEFAULT_SESSION_LIMIT_SECONDS = 15 * 60;
+
+type RoomMetadata = {
+  language?: string;
+  sessionDeadlineAt?: number;
+  sessionLimitSeconds?: number;
+};
 
 export async function GET(request: NextRequest) {
   try {
@@ -40,22 +47,25 @@ export async function GET(request: NextRequest) {
     // Pre-create the room with language metadata BEFORE the participant joins.
     // This ensures the agent can reliably read ctx.room.metadata on connect,
     // avoiding the race condition where metadata is set after the agent reads it.
+    const sessionLimitSeconds = getSessionLimitSeconds();
+    let sessionDeadlineAt = Date.now() + sessionLimitSeconds * 1000;
+
     if (API_KEY && API_SECRET && livekitServerUrl) {
-      const roomMetadata = JSON.stringify({ language });
       const roomService = new RoomServiceClient(
         livekitServerUrl,
         API_KEY,
         API_SECRET
       );
       try {
-        await roomService.createRoom({ name: roomName, metadata: roomMetadata });
-      } catch (err) {
-        // Room already exists — update its metadata instead
-        try {
-          await roomService.updateRoomMetadata(roomName, roomMetadata);
-        } catch {
-          // Best effort — request-agent will also set it as a fallback
-        }
+        const roomMetadata = await resolveRoomMetadata(
+          roomService,
+          roomName,
+          language,
+          sessionLimitSeconds
+        );
+        sessionDeadlineAt = roomMetadata.sessionDeadlineAt ?? sessionDeadlineAt;
+      } catch {
+        // Best effort — request-agent will also preserve metadata as a fallback
       }
     }
 
@@ -81,6 +91,8 @@ export async function GET(request: NextRequest) {
       roomName: roomName,
       participantToken: participantToken,
       participantName: participantName,
+      sessionDeadlineAt,
+      sessionLimitSeconds,
     };
 
     return new NextResponse(JSON.stringify(data), {
@@ -93,6 +105,67 @@ export async function GET(request: NextRequest) {
       return new NextResponse(error.message, { status: 500 });
     }
   }
+}
+
+async function resolveRoomMetadata(
+  roomService: RoomServiceClient,
+  roomName: string,
+  language: string,
+  sessionLimitSeconds: number
+): Promise<RoomMetadata> {
+  const rooms = await roomService.listRooms([roomName]);
+  const existingRoom = rooms.find((room) => room.name === roomName);
+  const existingMetadata = parseRoomMetadata(existingRoom?.metadata);
+  const sessionDeadlineAt =
+    existingMetadata.sessionDeadlineAt &&
+    existingMetadata.sessionDeadlineAt > Date.now()
+      ? existingMetadata.sessionDeadlineAt
+      : Date.now() + sessionLimitSeconds * 1000;
+  const nextMetadata: RoomMetadata = {
+    ...existingMetadata,
+    language,
+    sessionLimitSeconds,
+    sessionDeadlineAt,
+  };
+  const serializedMetadata = JSON.stringify(nextMetadata);
+
+  if (existingRoom) {
+    await roomService.updateRoomMetadata(roomName, serializedMetadata);
+    return nextMetadata;
+  }
+
+  try {
+    await roomService.createRoom({ name: roomName, metadata: serializedMetadata });
+    return nextMetadata;
+  } catch (err) {
+    try {
+      await roomService.updateRoomMetadata(roomName, serializedMetadata);
+      return nextMetadata;
+    } catch {
+      throw err;
+    }
+  }
+}
+
+function parseRoomMetadata(raw: string | undefined): RoomMetadata {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as RoomMetadata;
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getSessionLimitSeconds(): number {
+  const raw = process.env.SESSION_LIMIT_SECONDS;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return DEFAULT_SESSION_LIMIT_SECONDS;
 }
 
 function createParticipantToken(
