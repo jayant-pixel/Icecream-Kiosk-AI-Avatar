@@ -196,7 +196,7 @@ export function PageClientImpl(props: {
           onDisconnected={handleOnLeave}
           data-lk-theme="default"
         >
-          <VideoConference />
+          <VideoConference sessionDeadlineAt={connectionDetails.sessionDeadlineAt} />
           <DebugMode />
           <RecordingIndicator />
         </LiveKitRoom>

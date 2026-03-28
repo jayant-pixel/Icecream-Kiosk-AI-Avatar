@@ -5,6 +5,7 @@ import {
   ConnectionStateToast,
   RoomAudioRenderer,
   useDataChannel,
+  useRoomContext,
   useTracks,
   VideoTrack,
 } from "@livekit/components-react";
@@ -19,9 +20,14 @@ import { OverlayLayer } from "./OverlayLayer";
 // entirely, delete the import and the <ProductShowcase> element below.
 import { ProductShowcase } from "./ProductShowcase";
 
+const CLIENT_SESSION_END_GRACE_MS = 10_000;
+
 export function VideoConference({
+  sessionDeadlineAt,
   ...props
-}: React.HTMLAttributes<HTMLDivElement>) {
+}: React.HTMLAttributes<HTMLDivElement> & {
+  sessionDeadlineAt?: number;
+}) {
   const tracks = useTracks(
     [{ source: Track.Source.Camera, withPlaceholder: true }],
     { onlySubscribed: false }
@@ -58,6 +64,8 @@ export function VideoConference({
       {...props}
     >
       <div className="relative flex flex-1 items-start justify-center bg-black">
+        <SessionTimer deadlineAt={sessionDeadlineAt} />
+
         {avatarTrack ? (
           <div className="absolute inset-0 flex overflow-hidden items-start justify-center bg-black">
             <VideoTrack
@@ -112,4 +120,87 @@ export function VideoConference({
       <ConnectionStateToast />
     </div>
   );
+}
+
+function SessionTimer({ deadlineAt }: { deadlineAt?: number }) {
+  const room = useRoomContext();
+  const [remainingMs, setRemainingMs] = React.useState(() =>
+    getRemainingMs(deadlineAt)
+  );
+  const hasExpiredRef = React.useRef(false);
+  const disconnectTimeoutRef = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    hasExpiredRef.current = false;
+    setRemainingMs(getRemainingMs(deadlineAt));
+    if (disconnectTimeoutRef.current !== null) {
+      window.clearTimeout(disconnectTimeoutRef.current);
+      disconnectTimeoutRef.current = null;
+    }
+    if (!deadlineAt) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setRemainingMs(getRemainingMs(deadlineAt));
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [deadlineAt]);
+
+  React.useEffect(() => {
+    if (!room || hasExpiredRef.current || remainingMs > 0) {
+      return;
+    }
+    hasExpiredRef.current = true;
+    disconnectTimeoutRef.current = window.setTimeout(() => {
+      void room.disconnect();
+    }, CLIENT_SESSION_END_GRACE_MS);
+    return () => {
+      if (disconnectTimeoutRef.current !== null) {
+        window.clearTimeout(disconnectTimeoutRef.current);
+        disconnectTimeoutRef.current = null;
+      }
+    };
+  }, [remainingMs, room]);
+
+  if (!deadlineAt) {
+    return null;
+  }
+
+  const isExpired = remainingMs <= 0;
+  const isUrgent = remainingMs > 0 && remainingMs <= 60_000;
+
+  return (
+    <div className="pointer-events-none absolute right-4 top-4 z-20 sm:right-6 sm:top-6">
+      <div
+        className={[
+          "rounded-full border px-4 py-2 text-sm font-semibold shadow-lg backdrop-blur-md",
+          isExpired
+            ? "border-white/20 bg-black/75 text-white"
+            : isUrgent
+              ? "border-red-300/70 bg-red-500/85 text-white"
+              : "border-white/35 bg-black/55 text-white",
+        ].join(" ")}
+      >
+        {isExpired ? "Session ended" : `Time left ${formatRemainingTime(remainingMs)}`}
+      </div>
+    </div>
+  );
+}
+
+function getRemainingMs(deadlineAt?: number): number {
+  if (!deadlineAt) {
+    return 0;
+  }
+  return Math.max(deadlineAt - Date.now(), 0);
+}
+
+function formatRemainingTime(remainingMs: number): string {
+  const totalSeconds = Math.max(Math.ceil(remainingMs / 1000), 0);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
